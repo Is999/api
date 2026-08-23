@@ -3,9 +3,6 @@ package security
 import (
 	"encoding/base64"
 	"encoding/json"
-	"strings"
-
-	"api/helper"
 )
 
 const (
@@ -17,12 +14,14 @@ const (
 
 // EncodeCipherParams 把字段级加密配置编码成请求头值；整包加密标记不再生成请求头。
 func EncodeCipherParams(params []string) string {
-	params = helper.UniqueNonEmptyStrings(params)
 	if len(params) == 0 {
 		return ""
 	}
+	if err := ValidateSecurityFieldCount(params, "加密"); err != nil {
+		return ""
+	}
 	for _, param := range params {
-		if strings.EqualFold(param, CipherWholeBody) {
+		if param == CipherWholeBody {
 			return ""
 		}
 	}

@@ -25,4 +25,4 @@ rg -n "SCAN|Keys\\(|Scan\\(|redis\\.|Redis|fmt\\.Sprintf|:%|:\\*" --glob '*.go' 
 python3 <skill-dir>/scripts/redis_key_scan.py <repo>
 ```
 
-修改 helper/registry 时运行其归属包和所有直接调用包测试；修改共享 Key 模板、hash tag、编码或 TTL 时，分别运行每个消费仓库的契约测试。交付记录必须说明是否需要回填、清缓存、重建索引集合、双读，以及兼容窗口的开始版本、结束版本和清理条件。
+修改 helper/registry 时运行归属包和直接调用包测试；修改共享 Key 模板、hash tag、编码或 TTL 时，分别验证各消费仓库的当前契约。只有真实缓存数据需要处置时，才记录回填、精确失效或重建及其授权、验证和恢复边界；不预设双读或历史兼容窗口。

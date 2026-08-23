@@ -23,7 +23,6 @@ import (
 const (
 	defaultTimeoutSeconds = 5   // Lark HTTP 请求默认超时时间。
 	defaultMaxErrorBytes  = 800 // 告警错误摘要默认最大字节数。
-	maxTimeoutSeconds     = 30  // Lark HTTP 请求最大超时时间，避免异常上报长期阻塞。
 )
 
 // Notifier 负责向 Lark 群机器人发送告警。
@@ -164,6 +163,7 @@ func (n *Notifier) sendCard(ctx context.Context, card messageCard) error {
 
 // sendPayload 统一补齐签名并发送 Lark webhook 请求。
 func (n *Notifier) sendPayload(ctx context.Context, payload messagePayload) error {
+	// 签名按发送时刻生成，复用卡片内容也不能复用旧时间戳。
 	if n.secret != "" {
 		timestamp := strconv.FormatInt(n.now().Unix(), 10)
 		payload.Timestamp = timestamp
@@ -178,22 +178,34 @@ func (n *Notifier) sendPayload(ctx context.Context, payload messagePayload) erro
 		return errors.Tag(err)
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	// 请求同时受调用方 context 和客户端总超时约束；发送结果不明确时交由上层决定是否重试。
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return errors.Tag(err)
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	// 只保留 4 KiB 响应摘要，读取失败不能当作通知成功。
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return errors.Wrap(err, "读取 Lark 告警响应失败")
+	}
 	return checkResponse(resp.StatusCode, respBody)
 }
 
-// resolveConfigValue 优先使用明文配置，未配置时读取 *_ref 指向的文件。
+// resolveConfigValue 读取唯一配置来源；明文值和文件引用同时出现时拒绝启动。
 func resolveConfigValue(value string, ref string) (string, error) {
-	value = strings.TrimSpace(value)
+	if value != strings.TrimSpace(value) {
+		return "", errors.Errorf("配置值不能包含首尾空白")
+	}
+	if ref != strings.TrimSpace(ref) {
+		return "", errors.Errorf("配置引用路径不能包含首尾空白")
+	}
+	if value != "" && ref != "" {
+		return "", errors.Errorf("配置值与引用路径只能提供一个")
+	}
 	if value != "" {
 		return value, nil
 	}
-	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return "", nil
 	}
@@ -209,8 +221,8 @@ func boundedTimeout(seconds int) time.Duration {
 	if seconds <= 0 {
 		seconds = defaultTimeoutSeconds
 	}
-	if seconds > maxTimeoutSeconds {
-		seconds = maxTimeoutSeconds
+	if seconds > config.MaxLarkAlertTimeoutSeconds {
+		seconds = config.MaxLarkAlertTimeoutSeconds
 	}
 	return time.Duration(seconds) * time.Second
 }
@@ -232,6 +244,7 @@ func validateWebhookURL(rawURL string) error {
 
 // sign 按 Lark 自定义机器人规则生成 HMAC-SHA256 签名。
 func sign(timestamp string, secret string) string {
+	// Lark 将时间戳和密钥组成 HMAC key，消息体本身不参与该签名。
 	stringToSign := timestamp + "\n" + secret
 	mac := hmac.New(sha256.New, []byte(stringToSign))
 	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
@@ -243,6 +256,7 @@ func checkResponse(statusCode int, body []byte) error {
 	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 		return errors.Errorf("Lark 告警发送失败 status=%d body=%s", statusCode, bodyText)
 	}
+	// 现有协议接受 2xx 空响应；非空响应必须可解码，且任一已返回的业务码非零都算失败。
 	if bodyText == "" {
 		return nil
 	}

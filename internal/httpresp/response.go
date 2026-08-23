@@ -1,4 +1,4 @@
-package helper
+package httpresp
 
 import (
 	"context"
@@ -73,6 +73,7 @@ func (r *JSONResp) SetError(err error) *JSONResp {
 
 // Success 构造成功响应，并把请求结果同步写入 request meta。
 func (r *JSONResp) Success(data any) {
+	// 显式业务码覆盖场景默认值，文案仍按当前请求语言解析。
 	locale := responseLocale(r.ctx)
 	code := RespCodeSuccess
 	if r.code != nil {
@@ -82,6 +83,7 @@ func (r *JSONResp) Success(data any) {
 	if r.message != nil {
 		message = i18n.MessageByKey(*r.message, locale)
 	}
+	// 先清除旧错误元数据再写成功响应，后续日志与审计复用同一结果。
 	requestctx.SetErrorResponse(r.ctx, http.StatusOK, code, message, nil, "")
 
 	response := ResponseJSON{
@@ -96,6 +98,7 @@ func (r *JSONResp) Success(data any) {
 
 // Fail 构造失败响应，并同步 request meta 供日志与 trace 使用。
 func (r *JSONResp) Fail(message string, data ...any) {
+	// 显式业务码覆盖场景默认值，文案仍按当前请求语言解析。
 	locale := responseLocale(r.ctx)
 	code := RespCodeFail
 	if r.code != nil {
@@ -110,14 +113,13 @@ func (r *JSONResp) Fail(message string, data ...any) {
 		Status:  false,
 		Code:    code,
 		Message: message,
-		Data: func() any {
-			if len(data) > 0 {
-				return data[0]
-			}
-			return nil
-		}(),
+	}
+	// 可选详情只取首项；未提供时保持 nil，让 JSON 省略 data 字段。
+	if len(data) > 0 {
+		response.Data = data[0]
 	}
 	attachTraceToResponse(r.ctx, &response)
+	// HTTP 状态默认按业务码映射，路由可显式覆盖；内部错误不进入响应体。
 	httpStatus := codes.HTTPStatus(code)
 	if r.httpStatus != nil {
 		httpStatus = *r.httpStatus
@@ -128,6 +130,7 @@ func (r *JSONResp) Fail(message string, data ...any) {
 
 // Write 允许业务显式指定成功/失败标志。
 func (r *JSONResp) Write(success bool, data ...any) {
+	// 显式业务码覆盖场景默认值，文案仍按当前请求语言解析。
 	locale := responseLocale(r.ctx)
 	code := RespCodeUndefined
 	if r.code != nil {
@@ -141,14 +144,13 @@ func (r *JSONResp) Write(success bool, data ...any) {
 		Status:  success,
 		Code:    code,
 		Message: message,
-		Data: func() any {
-			if len(data) > 0 {
-				return data[0]
-			}
-			return nil
-		}(),
+	}
+	// 可选详情只取首项；未提供时保持 nil，让 JSON 省略 data 字段。
+	if len(data) > 0 {
+		response.Data = data[0]
 	}
 	attachTraceToResponse(r.ctx, &response)
+	// HTTP 状态默认按业务码映射，路由可显式覆盖；内部错误不进入响应体。
 	httpStatus := codes.HTTPStatus(code)
 	if r.httpStatus != nil {
 		httpStatus = *r.httpStatus
@@ -187,6 +189,5 @@ func internalErrorSummary(err error) string {
 	if err == nil {
 		return ""
 	}
-	summary := strings.TrimSpace(err.Error())
-	return summary
+	return strings.TrimSpace(err.Error())
 }

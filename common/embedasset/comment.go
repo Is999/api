@@ -17,6 +17,7 @@ func StripLeadingLineComments(source string, prefixes ...string) string {
 	}
 	lines := strings.SplitAfter(normalizedSource, "\n")
 	bodyIndex := 0
+	// 只有文件头实际出现注释才剥离空行，普通资产保留原始排版。
 	strippedComment := false
 	for bodyIndex < len(lines) {
 		currentLine := strings.TrimSpace(lines[bodyIndex])
@@ -29,6 +30,7 @@ func StripLeadingLineComments(source string, prefixes ...string) string {
 			bodyIndex++
 			continue
 		}
+		// 遇到第一行正文即结束，SQL/Lua 正文中的注释不属于维护头。
 		break
 	}
 	if !strippedComment {

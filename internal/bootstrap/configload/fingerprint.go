@@ -3,48 +3,27 @@ package configload
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"api/internal/bootstrap/configload/runtimefile"
 
-	utils "github.com/Is999/go-utils"
 	"github.com/Is999/go-utils/errors"
 )
 
-// configFileFingerprint 返回单个配置文件当前的稳定指纹。
-func configFileFingerprint(file string) (string, error) {
-	cleanFile := filepath.Clean(strings.TrimSpace(file))
-	info, err := os.Stat(cleanFile)
-	if err != nil {
-		return "", errors.Tag(err)
-	}
-	data, err := os.ReadFile(cleanFile)
-	if err != nil {
-		return "", errors.Tag(err)
-	}
-	realPath, err := filepath.EvalSymlinks(cleanFile)
-	if err != nil {
-		realPath = cleanFile
-	}
-	return fmt.Sprintf("%s|%d|%d|%s", realPath, info.Size(), info.ModTime().UnixNano(), utils.SHA256(string(data))), nil
-}
-
-// BundleFingerprint 返回主配置及外部配置文件组成的配置包指纹。
+// BundleFingerprint 读取主文件及其声明的外置文件，供 watcher 判断是否需要完整重载。
 func BundleFingerprint(file string) (string, error) {
-	mainFingerprint, err := configFileFingerprint(file)
+	cfg, mainFingerprint, err := loadBaseConfig(file)
 	if err != nil {
+		if mainFingerprint != "" {
+			// 非法内容仍有指纹，由完整 Load 记录具体错误；读取失败则直接返回。
+			return mainFingerprint, nil
+		}
 		return "", errors.Tag(err)
-	}
-	cfg, err := loadBaseConfig(file)
-	if err != nil {
-		return mainFingerprint, nil
 	}
 	parts := []string{mainFingerprint}
+	// 外置路径必须来自上述主文件字节，不能再次解析另一版本的主配置。
 	for _, include := range runtimefile.IncludePaths(file, cfg.ConfigFiles) {
-		fingerprint, innerErr := configFileFingerprint(include)
+		_, fingerprint, innerErr := runtimefile.ReadSource(include)
 		if innerErr != nil {
 			return "", errors.Wrapf(innerErr, "读取外部配置文件指纹失败 file=%s", include)
 		}
@@ -53,12 +32,8 @@ func BundleFingerprint(file string) (string, error) {
 	return strings.Join(parts, "\n"), nil
 }
 
-// Version 计算配置文件指纹短版本，用于健康检查展示当前配置版本。
-func Version(file string) (string, error) {
-	fingerprint, err := BundleFingerprint(file)
-	if err != nil {
-		return "", errors.Tag(err)
-	}
+// Version 只压缩已读取的配置包指纹，不再访问文件，避免旧配置绑定新文件版本。
+func Version(fingerprint string) string {
 	sum := sha256.Sum256([]byte(fingerprint))
-	return hex.EncodeToString(sum[:8]), nil
+	return hex.EncodeToString(sum[:8])
 }

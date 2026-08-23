@@ -14,9 +14,9 @@ description: "审查 Go 路由安全与敏感契约。用于 auth、JWT/session�
 5. Redis 会话 Hash、ZSET、version Key 和 Lua 原子操作保持同槽；覆盖同 token 单次刷新、refresh/logout 竞态、旧版本覆盖和多实例行为。
 6. 登录失败对外保持不可枚举的 code/status/message 与成本；内部审计保留真实原因。匿名高成本入口同时评估可信客户端 IP、账号/IP 限流、原子计数、TTL、429 契约和 Key 基数。
 7. token、ticket、nonce、验证码、重置 key、密钥和锁 owner 使用 CSPRNG，禁止时间种子或非安全随机 helper。
-8. 签名与加密只处理明确字段，不默认处理完整 body、大对象、数组或分页列表；响应字段满足 `ResponseCipher ⊆ ResponseSign`，服务端先签后加密、客户端先解密后验签。
+8. 签名与加密只处理明确字段，不默认处理完整 body、大对象、数组或分页列表；响应字段满足 `ResponseCipher ⊆ ResponseSign`。签名针对明文还是密文，必须按当前仓库的中间件包装顺序、客户端契约和链路测试核对；不得把一个仓库的签名/加密顺序作为通用规则传播。
 9. 响应安全中间件仅在需要改写时缓冲；下载、Range、SSE 和大响应保留流式输出与必要的 `Flusher`/`Hijacker`/`Pusher` 能力。
-10. 错误消息不暴露 SQL、密钥、内部表名、真实下游错误或 key material。
+10. 按客户端处理需要区分业务码；账号枚举、验签/解密阶段探测等场景保持对外状态、业务码和消息不可区分，内部脱敏记录真实原因，不暴露 SQL、密钥、内部表名或下游原始错误。
 
 ## 验证与交付
 

@@ -3,7 +3,6 @@ package handler
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"api/internal/config"
@@ -43,15 +42,15 @@ func TestRouteSecurityContractsFollowAccessBoundary(t *testing.T) {
 		}
 		switch access {
 		case shared.RouteAccessPublic:
-			if contract.Chain != RouteSecurityNone && contract.Chain != RouteSecurityPublic {
+			if contract.Chain != shared.RouteSecurityNone && contract.Chain != shared.RouteSecurityPublic {
 				t.Fatalf("public route %s chain = %s", contract.Alias, contract.Chain)
 			}
 		case shared.RouteAccessAuth:
-			if contract.Chain != RouteSecurityAuth {
+			if contract.Chain != shared.RouteSecurityAuth {
 				t.Fatalf("auth route %s chain = %s", contract.Alias, contract.Chain)
 			}
 		case shared.RouteAccessInternal:
-			if contract.Chain != RouteSecurityInternal {
+			if contract.Chain != shared.RouteSecurityInternal {
 				t.Fatalf("internal route %s chain = %s", contract.Alias, contract.Chain)
 			}
 		default:
@@ -64,13 +63,13 @@ func TestRouteSecurityContractsFollowAccessBoundary(t *testing.T) {
 func TestRouteSecurityPoliciesMatchSecurityContracts(t *testing.T) {
 	securityByAlias := routeSecurityContractByAlias()
 	for _, contract := range DefaultRouteSecurityContracts() {
-		policy := security.PolicyByRoute(string(contract.Alias))
+		policy, _ := security.LookupRoutePolicy(string(contract.Alias))
 		switch contract.Chain {
-		case RouteSecurityNone:
+		case shared.RouteSecurityNone:
 			if _, ok := security.RouteSecurityPolicies[routealias.Alias(contract.Alias)]; ok {
 				t.Fatalf("no-security route must not define frontend security policy: %s", contract.Alias)
 			}
-		case RouteSecurityInternal:
+		case shared.RouteSecurityInternal:
 			if policy.RequestSign != nil || policy.ResponseSign != nil || len(policy.RequestCipher) != 0 || len(policy.ResponseCipher) != 0 {
 				t.Fatalf("internal route must skip frontend sign/cipher policy: %s %+v", contract.Alias, policy)
 			}
@@ -98,6 +97,7 @@ func TestRouteSecurityPoliciesUseFieldLevelSecurity(t *testing.T) {
 		if hasSecurityField(policy.ResponseCipher, security.CipherWholeBody) {
 			t.Fatalf("route %s response cipher must not use cipher", alias)
 		}
+		// API 响应先加密后签名，每个密文字段都必须被签名覆盖。
 		for _, field := range policy.ResponseCipher {
 			if !hasSecurityField(policy.ResponseSign, field) {
 				t.Fatalf("route %s response cipher field %s must be covered by response sign", alias, field)
@@ -120,7 +120,7 @@ func TestRouteSecurityPoliciesUseFieldLevelSecurity(t *testing.T) {
 func TestPublicAndAuthRoutesDeclareSecurityPolicy(t *testing.T) {
 	for _, contract := range DefaultRouteSecurityContracts() {
 		switch contract.Chain {
-		case RouteSecurityPublic, RouteSecurityAuth:
+		case shared.RouteSecurityPublic, shared.RouteSecurityAuth:
 			if _, ok := security.RouteSecurityPolicies[routealias.Alias(contract.Alias)]; !ok {
 				t.Fatalf("frontend route must declare explicit security policy: %s", contract.Alias)
 			}
@@ -130,6 +130,7 @@ func TestPublicAndAuthRoutesDeclareSecurityPolicy(t *testing.T) {
 
 // TestRouteNoTokenBehaviorMatchesSecurityContracts 通过真实 handler 验证未登录访问边界。
 func TestRouteNoTokenBehaviorMatchesSecurityContracts(t *testing.T) {
+	// 从两个 Server 的真实注册结果取处理器；不启动监听器，也不执行 Server 全局中间件。
 	publicServer := rest.MustNewServer(rest.RestConf{Host: "127.0.0.1", Port: 0})
 	defer publicServer.Stop()
 	internalServer := rest.MustNewServer(rest.RestConf{Host: "127.0.0.1", Port: 0})
@@ -145,6 +146,7 @@ func TestRouteNoTokenBehaviorMatchesSecurityContracts(t *testing.T) {
 	routeHandlers := routeHandlerByKey(append(publicServer.Routes(), internalServer.Routes()...))
 	securityByAlias := routeSecurityContractByAlias()
 
+	// 这里只断言凭证拒绝边界，公开业务因参数或依赖缺失返回失败不代表其业务链通过。
 	for _, routeContract := range DefaultRouteContracts() {
 		key := routeKey(routeContract.Method, routeContract.Path)
 		handler, ok := routeHandlers[key]
@@ -157,15 +159,15 @@ func TestRouteNoTokenBehaviorMatchesSecurityContracts(t *testing.T) {
 		handler(rec, req)
 
 		switch securityContract.Chain {
-		case RouteSecurityNone, RouteSecurityPublic:
+		case shared.RouteSecurityNone, shared.RouteSecurityPublic:
 			if rec.Code == http.StatusUnauthorized {
 				t.Fatalf("route %s should not require token, got 401", key)
 			}
-		case RouteSecurityAuth:
+		case shared.RouteSecurityAuth:
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("route %s should require token, status=%d", key, rec.Code)
 			}
-		case RouteSecurityInternal:
+		case shared.RouteSecurityInternal:
 			if rec.Code != http.StatusForbidden {
 				t.Fatalf("route %s should require ops token, status=%d", key, rec.Code)
 			}
@@ -175,17 +177,17 @@ func TestRouteNoTokenBehaviorMatchesSecurityContracts(t *testing.T) {
 	}
 }
 
-// hasSecurityField 表示测试辅助逻辑。
+// hasSecurityField 判断安全字段清单是否包含指定协议字段。
 func hasSecurityField(fields []string, want string) bool {
 	for _, field := range fields {
-		if strings.EqualFold(strings.TrimSpace(field), want) {
+		if field == want {
 			return true
 		}
 	}
 	return false
 }
 
-// routeSecurityContractByAlias 返回路由测试辅助数据。
+// routeSecurityContractByAlias 按稳定别名索引安全契约，便于和路由元数据逐项对照。
 func routeSecurityContractByAlias() map[string]RouteSecurityContract {
 	result := make(map[string]RouteSecurityContract, len(DefaultRouteSecurityContracts()))
 	for _, contract := range DefaultRouteSecurityContracts() {
@@ -194,7 +196,7 @@ func routeSecurityContractByAlias() map[string]RouteSecurityContract {
 	return result
 }
 
-// routeHandlerByKey 返回路由测试辅助数据。
+// routeHandlerByKey 按 HTTP 方法和路径索引真实注册的处理器。
 func routeHandlerByKey(routes []rest.Route) map[string]http.HandlerFunc {
 	result := make(map[string]http.HandlerFunc, len(routes))
 	for _, route := range routes {

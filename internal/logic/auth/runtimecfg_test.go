@@ -5,11 +5,10 @@ import (
 	"testing"
 
 	"api/common/runtimecfg"
-	"api/internal/config"
 )
 
-// TestMain 验证对应场景符合预期。
+// TestMain 为认证包测试固定 Redis Key 使用的 AppID 命名空间。
 func TestMain(m *testing.M) {
-	runtimecfg.Set(config.Config{AppID: "site-a"})
+	runtimecfg.Set(runtimecfg.Snapshot{AppID: "site-a"})
 	os.Exit(m.Run())
 }

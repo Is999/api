@@ -17,8 +17,8 @@ import (
 	codes "api/common/codes"
 	i18n "api/common/i18n"
 	keys "api/common/rediskeys"
-	"api/helper"
 	"api/internal/config"
+	"api/internal/httpresp"
 	"api/internal/svc"
 
 	"github.com/Is999/go-utils/errors"
@@ -74,6 +74,7 @@ func (m *OpsMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 			writeOpsFailure(w, r, http.StatusForbidden, codes.Forbidden, i18n.MsgKeyForbidden, err)
 			return
 		}
+		// 先验签再占用 nonce，未认证请求不能消耗合法请求的防重放标记；Redis 故障不放行。
 		replayed, err := m.markOpsNonce(r, auth)
 		if err != nil {
 			writeOpsFailure(w, r, http.StatusServiceUnavailable, codes.ServiceBusy, i18n.MsgKeyServiceBusy, err)
@@ -89,7 +90,7 @@ func (m *OpsMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 
 // writeOpsFailure 输出统一运维鉴权失败响应，错误详情只保留在服务端错误链。
 func writeOpsFailure(w http.ResponseWriter, r *http.Request, httpStatus int, code int, messageKey string, err error) {
-	helper.NewJSONResp(r.Context(), w).
+	httpresp.NewJSONResp(r.Context(), w).
 		SetHTTPStatus(httpStatus).
 		SetCode(code).
 		SetError(err).
@@ -98,11 +99,12 @@ func writeOpsFailure(w http.ResponseWriter, r *http.Request, httpStatus int, cod
 
 // authenticateOpsWithClientIP 校验运维接口访问边界并返回防重放信息。
 func authenticateOpsWithClientIP(r *http.Request, cfg config.OpsConfig, clientIP string, now time.Time) (opsRequestAuth, error) {
-	token := strings.TrimSpace(cfg.ConfigReloadToken)
+	// 先用令牌与内网边界拒绝无权请求，再读取请求体计算摘要。
+	token := cfg.ConfigReloadToken
 	if token == "" {
 		return opsRequestAuth{}, errors.Errorf("运维接口令牌未配置")
 	}
-	got := strings.TrimSpace(r.Header.Get(HeaderOpsToken))
+	got := r.Header.Get(HeaderOpsToken)
 	if got == "" {
 		return opsRequestAuth{}, errors.Errorf("缺少请求头%s", HeaderOpsToken)
 	}
@@ -124,10 +126,11 @@ func authenticateOpsWithClientIP(r *http.Request, cfg config.OpsConfig, clientIP
 
 // validateOpsSignature 校验运维请求签名，并恢复请求体给后续 handler 使用。
 func validateOpsSignature(r *http.Request, token string, now time.Time) (opsRequestAuth, error) {
-	timestamp := strings.TrimSpace(r.Header.Get(HeaderOpsTimestamp))
+	timestamp := r.Header.Get(HeaderOpsTimestamp)
 	if timestamp == "" {
 		return opsRequestAuth{}, errors.Errorf("缺少请求头%s", HeaderOpsTimestamp)
 	}
+	// 时间窗先于请求体读取校验，使过期请求尽早失败。
 	signedAt, err := validateOpsTimestamp(timestamp, now)
 	if err != nil {
 		return opsRequestAuth{}, errors.Tag(err)
@@ -136,26 +139,41 @@ func validateOpsSignature(r *http.Request, token string, now time.Time) (opsRequ
 	if err != nil {
 		return opsRequestAuth{}, errors.Tag(err)
 	}
+	// 请求体只读取一次并恢复，摘要与 handler 消费同一字节序列。
 	body, err := readOpsSignedBody(r)
 	if err != nil {
 		return opsRequestAuth{}, errors.Tag(err)
 	}
 	bodyHash := opsBodySHA256(body)
-	gotBodyHash := strings.ToLower(strings.TrimSpace(r.Header.Get(HeaderOpsBodySHA256)))
+	gotBodyHash := r.Header.Get(HeaderOpsBodySHA256)
 	if gotBodyHash == "" {
 		return opsRequestAuth{}, errors.Errorf("缺少请求头%s", HeaderOpsBodySHA256)
+	}
+	if len(gotBodyHash) != sha256.Size*2 || gotBodyHash != strings.ToLower(gotBodyHash) || strings.TrimSpace(gotBodyHash) != gotBodyHash {
+		return opsRequestAuth{}, errors.Errorf("请求头%s必须是64位小写十六进制", HeaderOpsBodySHA256)
+	}
+	if _, err := hex.DecodeString(gotBodyHash); err != nil {
+		return opsRequestAuth{}, errors.Errorf("请求头%s必须是64位小写十六进制", HeaderOpsBodySHA256)
 	}
 	if subtle.ConstantTimeCompare([]byte(gotBodyHash), []byte(bodyHash)) != 1 {
 		return opsRequestAuth{}, errors.Errorf("运维接口请求体摘要不匹配")
 	}
-	gotSignature := strings.ToLower(strings.TrimSpace(r.Header.Get(HeaderOpsSignature)))
+	gotSignature := r.Header.Get(HeaderOpsSignature)
 	if gotSignature == "" {
 		return opsRequestAuth{}, errors.Errorf("缺少请求头%s", HeaderOpsSignature)
 	}
+	if len(gotSignature) != sha256.Size*2 || gotSignature != strings.ToLower(gotSignature) || strings.TrimSpace(gotSignature) != gotSignature {
+		return opsRequestAuth{}, errors.Errorf("请求头%s必须是64位小写十六进制", HeaderOpsSignature)
+	}
+	if _, err := hex.DecodeString(gotSignature); err != nil {
+		return opsRequestAuth{}, errors.Errorf("请求头%s必须是64位小写十六进制", HeaderOpsSignature)
+	}
+	// 签名覆盖原始 RequestURI，查询串顺序和编码均不可改写。
 	expectedSignature := signOpsRequest(token, r.Method, r.URL.RequestURI(), timestamp, nonce, bodyHash)
 	if !opsSignatureEqual(gotSignature, expectedSignature) {
 		return opsRequestAuth{}, errors.Errorf("运维接口签名不匹配")
 	}
+	// nonce 仅保存签名剩余有效期，窗口结束后即可回收。
 	ttl := signedAt.Add(opsSignatureWindow).Sub(now)
 	if ttl <= 0 {
 		return opsRequestAuth{}, errors.Errorf("运维接口签名已过期")
@@ -169,28 +187,31 @@ func validateOpsTimestamp(raw string, now time.Time) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, errors.Wrap(err, "运维接口签名时间戳非法")
 	}
-	signedAt := time.Unix(seconds, 0)
-	delta := now.Sub(signedAt)
-	if delta < 0 {
-		delta = -delta
+	if raw != strconv.FormatInt(seconds, 10) {
+		return time.Time{}, errors.Errorf("运维接口签名时间戳必须是规范十进制秒")
 	}
-	if delta > opsSignatureWindow {
+	nowSeconds := now.Unix()
+	windowSeconds := int64(opsSignatureWindow / time.Second)
+	if seconds < nowSeconds-windowSeconds || seconds > nowSeconds+windowSeconds {
 		return time.Time{}, errors.Errorf("运维接口签名已过期")
 	}
+	signedAt := time.Unix(seconds, 0)
 	return signedAt, nil
 }
 
 // validateOpsNonce 校验 nonce 为 16 字节随机值的规范小写十六进制编码。
 func validateOpsNonce(raw string) (string, error) {
-	nonce := strings.ToLower(strings.TrimSpace(raw))
-	if nonce == "" {
+	if raw == "" {
 		return "", errors.Errorf("缺少请求头%s", HeaderOpsNonce)
 	}
-	decoded, err := hex.DecodeString(nonce)
-	if err != nil || len(decoded) != opsNonceBytes || nonce != strings.TrimSpace(raw) {
+	if raw != strings.TrimSpace(raw) || raw != strings.ToLower(raw) {
 		return "", errors.Errorf("请求头%s非法", HeaderOpsNonce)
 	}
-	return nonce, nil
+	decoded, err := hex.DecodeString(raw)
+	if err != nil || len(decoded) != opsNonceBytes {
+		return "", errors.Errorf("请求头%s非法", HeaderOpsNonce)
+	}
+	return raw, nil
 }
 
 // markOpsNonce 使用 Redis SET NX 原子占用 nonce；true 表示 nonce 已存在。
@@ -221,7 +242,20 @@ func readOpsSignedBody(r *http.Request) ([]byte, error) {
 	if len(body) > opsSignatureBodyMaxBytes {
 		return nil, errors.Errorf("运维接口请求体超过大小限制")
 	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		contentType, parseErr := requestMediaType(r)
+		if parseErr != nil {
+			return nil, errors.Tag(parseErr)
+		}
+		if contentType != "application/json" {
+			return nil, errors.Errorf("运维接口非空请求体 Content-Type 必须为 application/json")
+		}
+		// 与公开安全链保持相同解析契约，避免合法大小写变体通过验签后被 go-zero 当成空请求体。
+		r.Header.Set("Content-Type", "application/json")
+	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
+	// 验签已完整缓冲 chunked/未知长度请求体，下游 httpx.Parse 依赖正数 ContentLength 才会解析 JSON。
+	r.ContentLength = int64(len(body))
 	return body, nil
 }
 
@@ -263,8 +297,8 @@ func clientIPAllowed(clientIP string, allowed []string) bool {
 	if !ok || !isInternalClientAddr(addr) {
 		return false
 	}
-	allowed = normalizeAllowedIPs(allowed)
 	if len(allowed) == 0 {
+		// 空白名单只省略进一步收窄，前面的私网/回环限制仍然生效。
 		return true
 	}
 	for _, item := range allowed {
@@ -290,11 +324,14 @@ func forwardedHeaderHasPublicAddr(r *http.Request) bool {
 	if r == nil {
 		return false
 	}
+	// 同名头可以分行传输，逐值检查才能拦截后续行中的公网来源。
 	for _, header := range []string{"X-Forwarded-For", "X-Real-IP"} {
-		for _, item := range strings.Split(r.Header.Get(header), ",") {
-			addr, ok := parseAddrValue(item)
-			if ok && !isInternalClientAddr(addr) {
-				return true
+		for _, value := range r.Header.Values(header) {
+			for item := range strings.SplitSeq(value, ",") {
+				addr, ok := parseAddrValue(item)
+				if ok && !isInternalClientAddr(addr) {
+					return true
+				}
 			}
 		}
 	}
@@ -323,16 +360,4 @@ func parseAddrValue(raw string) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	return addr.Unmap(), true
-}
-
-// normalizeAllowedIPs 清洗配置中的空白 IP 或 CIDR。
-func normalizeAllowedIPs(items []string) []string {
-	result := make([]string, 0, len(items))
-	for _, item := range items {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			result = append(result, item)
-		}
-	}
-	return result
 }

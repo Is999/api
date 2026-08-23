@@ -7,6 +7,7 @@ import (
 
 // TestUserSchemaAsset 验证业务用户表 DDL 会剥离说明头。
 func TestUserSchemaAsset(t *testing.T) {
+	// 读取器应剥离资产说明，但保留完整建表语句。
 	sql := readMigrationSQL(userSchemaAsset)
 
 	if strings.Contains(sql, "代码资产") {
@@ -15,6 +16,7 @@ func TestUserSchemaAsset(t *testing.T) {
 	if !strings.Contains(sql, "CREATE TABLE IF NOT EXISTS `user`") {
 		t.Fatalf("readMigrationSQL(userSchemaAsset) missing user DDL: %q", sql)
 	}
+	// 主表必须包含分片、安全联系方式和认证版本约束。
 	for _, want := range []string{
 		"`id` bigint NOT NULL COMMENT '雪花ID'",
 		"`shard_no` int NOT NULL DEFAULT 0 COMMENT 'ID哈希分片，CRC32(id字符串)%1024，用于分表和分片游标查询'",
@@ -33,6 +35,7 @@ func TestUserSchemaAsset(t *testing.T) {
 			t.Fatalf("readMigrationSQL(userSchemaAsset) missing %q: %q", want, sql)
 		}
 	}
+	// 禁止恢复旧的取模分片规则和联系方式明文列。
 	for _, forbidden := range []string{"MOD(`id`, 1024)", "`id` % 1024", "id%1024"} {
 		if strings.Contains(sql, forbidden) {
 			t.Fatalf("readMigrationSQL(userSchemaAsset) should not use id modulo rule %q: %q", forbidden, sql)
@@ -98,6 +101,7 @@ func TestUserIdentitySchemaAssets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.tableName, func(t *testing.T) {
+			// 每个资产只能创建自己的身份表，并共享基础分片索引。
 			sql := readMigrationSQL(tt.asset)
 			if strings.Contains(sql, "代码资产") {
 				t.Fatalf("readMigrationSQL(%s) should strip header comments: %q", tt.asset, sql)
@@ -111,11 +115,13 @@ func TestUserIdentitySchemaAssets(t *testing.T) {
 					t.Fatalf("readMigrationSQL(%s) missing %q: %q", tt.asset, want, sql)
 				}
 			}
+			// 表类型专属字段和索引必须完整存在。
 			for _, want := range tt.want {
 				if !strings.Contains(sql, want) {
 					t.Fatalf("readMigrationSQL(%s) missing %q: %q", tt.asset, want, sql)
 				}
 			}
+			// 冗余类型列、旧路由列和其它身份表结构不得混入当前资产。
 			for _, forbidden := range append([]string{"`identity_type`", "idx_user_identity_type_user", "user_route_shard_count", "idx_user_identity_user_route"}, tt.forbid...) {
 				if strings.Contains(sql, forbidden) {
 					t.Fatalf("readMigrationSQL(%s) should not keep redundant identity type %q: %q", tt.asset, forbidden, sql)
@@ -152,7 +158,12 @@ func TestSchemaMigrationsSQL(t *testing.T) {
 	if strings.Contains(sql, "代码资产") {
 		t.Fatalf("SchemaMigrationsSQL() should strip header comments: %q", sql)
 	}
-	if !strings.Contains(sql, "CREATE TABLE IF NOT EXISTS `schema_migrations`") {
-		t.Fatalf("SchemaMigrationsSQL() missing schema_migrations DDL: %q", sql)
+	if schemaMigrationTable != "api_schema_migrations" || !strings.Contains(sql, "CREATE TABLE IF NOT EXISTS `"+schemaMigrationTable+"`") {
+		t.Fatalf("SchemaMigrationsSQL() missing API-owned DDL: %q", sql)
+	}
+	for _, want := range []string{"PRIMARY KEY (`version`)", "UNIQUE KEY `uk_api_schema_migrations_name` (`name`)", "`applied_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP"} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("API 登记主键、唯一约束或默认时间缺失: %s", want)
+		}
 	}
 }

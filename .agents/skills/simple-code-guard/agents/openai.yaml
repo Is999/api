@@ -1,4 +1,4 @@
 interface:
   display_name: "简洁代码护栏"
-  short_description: "区分已启用、基础能力与废弃项，只删除确认无用代码和文件"
-  default_prompt: "使用 $simple-code-guard 区分生产已启用、基础能力未激活和确认废弃无用项，只清理有完整证据的复杂度。"
+  short_description: "按专业实现、初级开发者易维护的要求，检查主流程、职责和重复逻辑。"
+  default_prompt: "使用 $simple-code-guard 在正确性、安全、数据和资源边界不变的前提下，以简洁、清晰、易阅读易维护为最高优先级，检查主流程、轻量事务与就近注释，让初级开发者通过代码理解需求并定位修改和回归。"

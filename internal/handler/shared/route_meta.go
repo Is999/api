@@ -1,7 +1,6 @@
 package shared
 
 import (
-	"api/internal/middleware"
 	"api/internal/routealias"
 )
 
@@ -20,16 +19,16 @@ const (
 
 // RouteMeta 描述一条业务路由的统一元数据。
 type RouteMeta struct {
-	Alias    middleware.RouteAlias // 统一路由别名
-	Access   RouteAccess           // 访问边界：public/auth/internal
-	Describe string                // 中文业务说明
+	Alias    routealias.Alias // 统一路由别名
+	Access   RouteAccess      // 访问边界：public/auth/internal
+	Describe string           // 中文业务说明
 }
 
 // defaultRouteMetas 按声明顺序登记内置路由元数据。
 var defaultRouteMetas []RouteMeta
 
 // newRouteMeta 创建并登记路由元数据，避免 RouteMeta 变量和默认清单双份维护。
-func newRouteMeta(alias middleware.RouteAlias, access RouteAccess, describe string) RouteMeta {
+func newRouteMeta(alias routealias.Alias, access RouteAccess, describe string) RouteMeta {
 	meta := RouteMeta{Alias: alias, Access: access, Describe: describe}
 	defaultRouteMetas = append(defaultRouteMetas, meta)
 	return meta

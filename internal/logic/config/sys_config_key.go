@@ -50,7 +50,7 @@ func NewSysConfigKeyRegistry(items ...SysConfigKey) (*SysConfigKeyRegistry, erro
 	return registry, nil
 }
 
-// Items 返回配置 key 快照。
+// Items 返回声明顺序的浅副本；Default 中的容器仍属注册表，只读使用。
 func (r *SysConfigKeyRegistry) Items() []SysConfigKey {
 	if r == nil || len(r.items) == 0 {
 		return nil
@@ -62,19 +62,15 @@ func (r *SysConfigKeyRegistry) Items() []SysConfigKey {
 
 // Lookup 按 uuid 查找配置 key。
 func (r *SysConfigKeyRegistry) Lookup(uuid string) (SysConfigKey, bool) {
-	if r == nil {
+	if r == nil || !validSysConfigUUID(uuid) {
 		return SysConfigKey{}, false
 	}
-	key, ok := r.index[strings.TrimSpace(uuid)]
+	key, ok := r.index[uuid]
 	return key, ok
 }
 
 // GetValue 按声明类型读取配置值。
 func (l *SysConfigLogic) GetValue(key SysConfigKey) (any, error) {
-	key, err := normalizeSysConfigKey(key)
-	if err != nil {
-		return nil, errors.Tag(err)
-	}
 	return l.getValueByKey(key, key.Type)
 }
 
@@ -130,7 +126,7 @@ func (l *SysConfigLogic) GetBool(key SysConfigKey) (bool, error) {
 	return flag, nil
 }
 
-// GetObject 读取 Object 类型配置值。
+// GetObject 读取 Object 类型配置值；返回注册表默认容器时只读使用。
 func (l *SysConfigLogic) GetObject(key SysConfigKey) (map[string]any, error) {
 	value, err := l.getValueByKey(key, model.SysConfigTypeObject)
 	if err != nil {
@@ -143,7 +139,7 @@ func (l *SysConfigLogic) GetObject(key SysConfigKey) (map[string]any, error) {
 	return object, nil
 }
 
-// GetArray 读取 Array 类型配置值。
+// GetArray 读取 Array 类型配置值；返回注册表默认容器时只读使用。
 func (l *SysConfigLogic) GetArray(key SysConfigKey) ([]any, error) {
 	value, err := l.getValueByKey(key, model.SysConfigTypeArray)
 	if err != nil {
@@ -176,7 +172,9 @@ func (l *SysConfigLogic) getValueByKey(key SysConfigKey, expectedType int) (any,
 	}
 	entry, err := l.getCachedEntry(key.UUID)
 	if err != nil {
+		// 默认值只覆盖配置不存在，缓存故障、类型漂移不能被默认值掩盖。
 		if errors.Is(err, ErrSysConfigNotFound) && key.HasDefault {
+			// 容器默认值由注册表共享，调用方需修改时应先复制。
 			return key.Default, nil
 		}
 		return nil, errors.Tag(err)
@@ -191,12 +189,11 @@ func (l *SysConfigLogic) getValueByKey(key SysConfigKey, expectedType int) (any,
 	return decodeSysConfigValue(actualType, entry[sysConfigCacheFieldValue])
 }
 
-// normalizeSysConfigKey 清洗并校验配置 key。
+// normalizeSysConfigKey 只裁剪说明文本，UUID 与声明类型必须原样满足注册约束。
 func normalizeSysConfigKey(key SysConfigKey) (SysConfigKey, error) {
-	key.UUID = strings.TrimSpace(key.UUID)
 	key.Description = strings.TrimSpace(key.Description)
-	if key.UUID == "" {
-		return SysConfigKey{}, errors.Errorf("系统配置 key uuid 不能为空")
+	if !validSysConfigUUID(key.UUID) {
+		return SysConfigKey{}, errors.Errorf("系统配置 key uuid 不能为空或包含首尾空白")
 	}
 	if !validSysConfigType(key.Type) {
 		return SysConfigKey{}, errors.Errorf("系统配置 key 类型非法 uuid=%s type=%d", key.UUID, key.Type)
@@ -213,6 +210,7 @@ func normalizeSysConfigKey(key SysConfigKey) (SysConfigKey, error) {
 
 // normalizeSysConfigDefault 校验默认值类型并做必要转换。
 func normalizeSysConfigDefault(typ int, value any) (any, error) {
+	// 无类型 nil 归一为空容器，保证默认结果可按声明的容器类型断言。
 	switch typ {
 	case model.SysConfigTypeObject:
 		if value == nil {
@@ -245,6 +243,7 @@ func normalizeSysConfigDefault(typ int, value any) (any, error) {
 		}
 		return number, nil
 	case model.SysConfigTypeFloat:
+		// 允许 int 转 float64；大整数可能舍入，精确整数配置应声明为 Integer。
 		switch number := value.(type) {
 		case float64:
 			return number, nil

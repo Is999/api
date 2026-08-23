@@ -27,6 +27,7 @@ func TableCacheManager(base *corelogic.BaseLogic) (*tablecache.Manager, error) {
 	if base == nil || base.Redis() == nil {
 		return nil, errors.Errorf("Redis未初始化")
 	}
+	// Manager 是请求级组装；Redis 和指标复用进程资源，回源锁及空值 TTL 交由 table-cache 管理。
 	return tablecache.NewManager(
 		tablecache.NewRedisStore(base.Redis()),
 		tableCacheTargets(base),
@@ -48,16 +49,9 @@ func tableCacheKeyPrefix(base *corelogic.BaseLogic) string {
 
 // TableCachePhysicalKey 把逻辑缓存 key 转换为 table-cache 真实 Redis key。
 func TableCachePhysicalKey(base *corelogic.BaseLogic, key string) string {
-	key = strings.TrimSpace(key)
 	prefix := tableCacheKeyPrefix(base)
-	if key == "" || prefix == "" || strings.HasPrefix(key, prefix) {
-		return key
-	}
-	if keys.IsForeignKey(key) {
+	if key == "" || key != strings.TrimSpace(key) || prefix == "" || keys.HasPrefix(key) {
 		return ""
-	}
-	if keys.HasPrefix(key) {
-		return key
 	}
 	return prefix + key
 }
@@ -85,12 +79,4 @@ func cacheTemplatePrefix(key string) string {
 		return strings.TrimSpace(key[:index])
 	}
 	return strings.TrimSpace(key)
-}
-
-// tableCacheFirstStringPart 读取前缀型缓存 key 的第一个参数。
-func tableCacheFirstStringPart(params tablecache.LoadParams, title string) (string, error) {
-	if len(params.KeyParts) == 0 || strings.TrimSpace(params.KeyParts[0]) == "" {
-		return "", errors.Errorf("%s不能为空", title)
-	}
-	return strings.TrimSpace(params.KeyParts[0]), nil
 }

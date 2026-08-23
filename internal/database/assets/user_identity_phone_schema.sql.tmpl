@@ -1,7 +1,7 @@
 -- 代码资产：创建业务用户手机号登录身份索引表。
 -- SQL 方言：MySQL 8.0 InnoDB。
 -- 调用方：internal/database.DefaultMigrations 通过迁移 runner 执行。
--- 安全边界：只创建空索引表；历史手机号身份需按 user.id 游标分批回填，避免在线长事务。
+-- 安全边界：仅补建不存在的表，不修改已有表结构或数据；未登记资产可由初始化命令幂等续跑。
 CREATE TABLE IF NOT EXISTS `user_identity_phone` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '主键ID',
   `identity_hash` char(64) NOT NULL COMMENT '归一化手机号HMAC查询哈希',

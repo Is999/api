@@ -2,7 +2,7 @@ package handler
 
 import "api/internal/handler/shared"
 
-// routeMetaAccessByAlias 返回路由测试辅助数据。
+// routeMetaAccessByAlias 按稳定别名索引访问级别，供真实路由与安全链契约交叉比对。
 func routeMetaAccessByAlias() map[string]shared.RouteAccess {
 	result := make(map[string]shared.RouteAccess, len(shared.DefaultRouteMetas()))
 	for _, meta := range shared.DefaultRouteMetas() {

@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeromicro/go-zero/core/proc"
 	"github.com/zeromicro/go-zero/core/service"
 	"github.com/zeromicro/go-zero/rest"
 )
 
 // TestLimitHTTPDrainClosesLongRequest 确保长请求不会阻塞后续资源关闭。
 func TestLimitHTTPDrainClosesLongRequest(t *testing.T) {
+	// 处理器阻塞到请求上下文取消，用于模拟超过排空期限的长请求。
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -28,6 +28,7 @@ func TestLimitHTTPDrainClosesLongRequest(t *testing.T) {
 	defer close(drainDone)
 	limitHTTPDrain(server, 30*time.Millisecond, drainDone)
 
+	// 服务启动并确认请求进入后再触发关闭，避免把连接竞态当成排空结果。
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- server.Serve(listener)
@@ -41,6 +42,7 @@ func TestLimitHTTPDrainClosesLongRequest(t *testing.T) {
 		t.Fatal("long request did not start")
 	}
 
+	// Shutdown 必须在排空上限内结束，同时 Serve 只允许返回标准关闭错误。
 	shutdownDone := make(chan error, 1)
 	go func() {
 		shutdownDone <- server.Shutdown(context.Background())
@@ -60,8 +62,6 @@ func TestLimitHTTPDrainClosesLongRequest(t *testing.T) {
 
 // TestRunHTTPServersReturnsBindErrorAndClosesPeer 确保端口冲突返回 error，且已启动的同组监听器会被关闭。
 func TestRunHTTPServersReturnsBindErrorAndClosesPeer(t *testing.T) {
-	// go-zero 的监听器在端口绑定失败时仍会登记全局关闭回调；测试结束时用其测试专用入口清空回调，避免遗留等待协程。
-	defer proc.Shutdown()
 	goodPort := reserveHTTPTestPort(t)
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

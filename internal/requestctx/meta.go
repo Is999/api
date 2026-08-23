@@ -17,28 +17,29 @@ const (
 // metaKey 是 request meta 在 context 中的私有 key。
 type metaKey struct{}
 
-// Meta 保存一次请求在应用内传播的链路与审计元数据。
+// Meta 保存一次请求顺序更新的链路与审计元数据；异步任务不能并发修改同一份实例。
 type Meta struct {
-	StartedAt     time.Time // 请求元数据创建时间
+	StartedAt     time.Time // 入口首次创建时间，后续中间件复用，供耗时计算
 	TraceID       string    // 链路追踪 ID
 	SpanID        string    // 当前服务内处理片段 ID
 	Route         string    // 统一路由别名
 	Method        string    // HTTP 方法
 	Path          string    // HTTP 请求路径
-	ClientIP      string    // 客户端 IP
-	Locale        string    // 请求语言
-	UserID        int64     // 当前用户 ID
-	UserName      string    // 当前用户名称
-	AccessToken   string    // 当前请求携带的访问令牌
-	SessionID     string    // 当前登录会话 ID
+	ClientIP      string    // 按可信代理规则解析的来源 IP，不直接采信任意转发头
+	Locale        string    // 已解析请求语言，空值由响应出口采用默认语言
+	UserID        int64     // 通过鉴权后写入的用户 ID，0 表示尚未确认身份
+	UserName      string    // 通过鉴权后写入的用户名，不采用请求自报值
+	authUser      AuthUser  // 鉴权中间件从主库确认的请求级用户快照，零值表示尚未鉴权
+	AccessToken   string    // 当前请求访问令牌，仅在请求内传递，禁止记录到日志
+	SessionID     string    // JWT 与 Redis 核对后的会话 ID，刷新时保持不变
 	Node          string    // 当前服务节点
 	Mode          string    // 当前运行模式
-	HTTPStatus    int       // HTTP 状态码
-	BizCode       int       // 业务状态码
-	BizMessage    string    // 业务响应文案
+	HTTPStatus    int       // 统一响应出口回填的 HTTP 状态，初始值不能代表请求成功
+	BizCode       int       // 统一响应出口回填的业务码
+	BizMessage    string    // 已按请求语言解析的最终响应文案
 	LatencyMS     int64     // 请求总耗时（毫秒）
-	ErrorMessage  string    // 错误信息
-	ErrorCause    error     // 原始错误对象
+	ErrorMessage  string    // 内部错误摘要，仅供日志和 trace，不返回客户端
+	ErrorCause    error     // 保留包装链的内部错误对象，供错误分类使用
 	SkipAccessLog bool      // 是否跳过普通访问日志，供高频探针路由降噪
 	TaskID        string    // 当前异步任务 ID
 	WorkflowID    string    // 当前工作流实例 ID
@@ -49,6 +50,7 @@ type Meta struct {
 
 // New 为请求创建统一元数据容器。
 func New(ctx context.Context) (context.Context, *Meta) {
+	// 多层中间件共享既有容器，避免后注册的入口覆盖身份或链路信息。
 	if meta := FromContext(ctx); meta != nil {
 		if meta.StartedAt.IsZero() {
 			meta.StartedAt = time.Now()
@@ -76,6 +78,14 @@ func FromContext(ctx context.Context) *Meta {
 		return meta
 	}
 	return nil
+}
+
+// Locale 返回请求语言；上下文没有显式语言时由调用方选择默认值。
+func Locale(ctx context.Context) string {
+	if meta := FromContext(ctx); meta != nil {
+		return strings.TrimSpace(meta.Locale)
+	}
+	return ""
 }
 
 // SetTrace 记录当前请求最终采用的 trace/span。
@@ -205,7 +215,7 @@ func RefreshLatency(ctx context.Context) {
 	}
 }
 
-// SetTask 写入异步任务基础信息，便于未来任务链路复用同一日志维度。
+// SetTask 为任务入口写入日志关联 ID，空值不覆盖已有上下文。
 func SetTask(ctx context.Context, taskID string) {
 	if meta := FromContext(ctx); meta != nil && strings.TrimSpace(taskID) != "" {
 		meta.TaskID = strings.TrimSpace(taskID)

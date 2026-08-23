@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"api/internal/handler/shared"
-	"api/internal/svc"
 )
 
 // RouteSpecs 返回前台用户路由规格。
@@ -16,9 +15,7 @@ func RouteSpecs() []shared.RouteSpec {
 			Meta:         shared.UserProfile,
 			DocumentPath: shared.RouteDocUser,
 			Chain:        shared.RouteSecurityAuth,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return UserProfileHandler(svcCtx)
-			},
+			Handler:      UserProfileHandler,
 		},
 		{
 			Method:       http.MethodPost,
@@ -26,9 +23,7 @@ func RouteSpecs() []shared.RouteSpec {
 			Meta:         shared.UserRuntimeSync,
 			DocumentPath: shared.RouteDocUser,
 			Chain:        shared.RouteSecurityInternal,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return UserRuntimeSyncHandler(svcCtx)
-			},
+			Handler:      UserRuntimeSyncHandler,
 		},
 	}
 }

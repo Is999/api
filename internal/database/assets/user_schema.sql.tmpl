@@ -1,8 +1,8 @@
 -- 代码资产：创建 user 业务用户表；API 项目内使用 user 表名，后台管理员表由 admin 项目独立维护。
 -- SQL 方言：MySQL 8.0 InnoDB。
--- 调用方：internal/database.UserSchemaSQL 通过 go:embed 加载，并先剥离本说明再返回可执行 SQL。
+-- 调用方：internal/database.DefaultMigrations 通过 readMigrationSQL 加载，剥离文件头后交由初始化 runner 执行。
 -- 参数来源：无动态参数；DDL 固定创建 user 表。
--- 安全边界：仅用于初始化或迁移；上线前确认目标库、字符集和唯一索引不会与历史数据冲突。
+-- 安全边界：仅补建不存在的表，不修改已有表结构或数据；未登记资产可由初始化命令幂等续跑。
 CREATE TABLE IF NOT EXISTS `user` (
   `id` bigint NOT NULL COMMENT '雪花ID',
   `shard_no` int NOT NULL DEFAULT 0 COMMENT 'ID哈希分片，CRC32(id字符串)%1024，用于分表和分片游标查询',

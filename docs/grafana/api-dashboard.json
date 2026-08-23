@@ -32,6 +32,7 @@
           "refId": "A"
         }
       ],
+      "description": "五分钟窗口内每秒 Kafka 投递事件数；投递成功不等于消费端已写库。",
       "title": "Collector Kafka 投递结果",
       "type": "timeseries"
     },
@@ -42,7 +43,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops"
+          "unit": "s"
         },
         "overrides": []
       },
@@ -62,6 +63,7 @@
           "refId": "A"
         }
       ],
+      "description": "按业务类型、发号策略和结果汇总的 P95 发号耗时，单位为秒。",
       "title": "ID 生成耗时 P95",
       "type": "timeseries"
     },
@@ -92,6 +94,7 @@
           "refId": "A"
         }
       ],
+      "description": "向 Redis 申请新号段的 P95 耗时，单位为秒，不含本地取号。",
       "title": "ID Segment 申请耗时 P95",
       "type": "timeseries"
     },
@@ -122,6 +125,7 @@
           "refId": "A"
         }
       ],
+      "description": "按事件类型统计 Snowflake 节点租约活动，不能作为业务发号吞吐。",
       "title": "Snowflake 租约事件",
       "type": "timeseries"
     },
@@ -152,6 +156,7 @@
           "refId": "A"
         }
       ],
+      "description": "按业务类型、发号策略和结果汇总每秒发号次数。",
       "title": "ID 生成吞吐",
       "type": "timeseries"
     },
@@ -182,7 +187,8 @@
           "refId": "A"
         }
       ],
-      "title": "ID Segment 本地剩余号段",
+      "description": "各实例当前本地号段尚可使用的 ID 个数，不是 Redis 全局余额。",
+      "title": "ID Segment 本地剩余 ID 数",
       "type": "timeseries"
     }
   ],

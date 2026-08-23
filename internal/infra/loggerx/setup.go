@@ -15,6 +15,7 @@ import (
 
 // Setup 初始化 go-zero 日志，并在文件输出模式下额外镜像到 stdout 方便容器采集。
 func Setup(c config.Config) error {
+	// logx 与 go-utils 配置为进程级状态，只能在接收请求前安装。
 	if shouldMoveBuiltinCaller(c.Log.FieldKeys.CallerKey) {
 		c.Log.FieldKeys.CallerKey = fieldLogCaller
 	}
@@ -22,7 +23,8 @@ func Setup(c config.Config) error {
 		return errors.Wrap(err, "初始化 go-zero 日志失败")
 	}
 	wrapCurrentLogWriter()
-	if strings.EqualFold(c.Log.Mode, "file") {
+	if c.Log.Mode == "file" {
+		// 文件和 stdout 共用过滤规则，最终由主入口关闭组合 writer。
 		logx.AddWriter(wrapLogWriter(logx.NewWriter(os.Stdout)))
 	}
 	errors.SetStackDepth(32)
@@ -173,7 +175,7 @@ func (l *goUtilsLogger) With(args ...any) utils.Logger {
 	return newGoUtilsLogger(fields)
 }
 
-// Enabled 返回日志级别是否启用。
+// Enabled 允许适配调用进入 logx，再由 logx 按自身级别过滤。
 func (l *goUtilsLogger) Enabled(_ context.Context, _ utils.LogLevel) bool {
 	return true
 }
@@ -184,6 +186,7 @@ func (l *goUtilsLogger) logFields(args ...any) []logx.LogField {
 	merged = append(merged, l.fields...)
 	merged = append(merged, args...)
 	fields := make([]logx.LogField, 0, (len(merged)+1)/2)
+	// 日志适配不因畸形键值对中断业务：非字符串键记为 field，尾部缺值记为空字符串。
 	for i := 0; i < len(merged); i += 2 {
 		key, ok := merged[i].(string)
 		if !ok || strings.TrimSpace(key) == "" {

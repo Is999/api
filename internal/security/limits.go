@@ -5,8 +5,6 @@ import (
 	"reflect"
 	"strings"
 
-	"api/helper"
-
 	"github.com/Is999/go-utils/errors"
 )
 
@@ -27,7 +25,16 @@ var ErrSecurityPayloadTooLarge = errors.New("security payload exceeds limits")
 
 // ValidateSecurityFieldCount 校验安全字段数量，避免单接口堆叠过多签名或加密字段。
 func ValidateSecurityFieldCount(fields []string, scope string) error {
-	fields = helper.UniqueNonEmptyStrings(fields)
+	seen := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		if field == "" || field != strings.TrimSpace(field) {
+			return errors.Errorf("%s字段不能为空或包含首尾空白", scope)
+		}
+		if _, exists := seen[field]; exists {
+			return errors.Errorf("%s字段重复: %s", scope, field)
+		}
+		seen[field] = struct{}{}
+	}
 	if len(fields) > MaxSecurityFieldCount {
 		return errors.Wrapf(ErrSecurityPayloadTooLarge, "%s字段数量超过上限: %d", scope, MaxSecurityFieldCount)
 	}
@@ -45,7 +52,7 @@ func ValidateSecurityScalarValue(scope string, field string, value any) error {
 // ValidateSecurityTextValue 校验安全字段字符串长度。
 func ValidateSecurityTextValue(scope string, field string, value string, maxBytes int) error {
 	field = strings.TrimSpace(field)
-	if len([]byte(value)) > maxBytes {
+	if len(value) > maxBytes {
 		return errors.Wrapf(ErrSecurityPayloadTooLarge, "%s字段[%s]长度超过上限: %d", scope, field, maxBytes)
 	}
 	return nil

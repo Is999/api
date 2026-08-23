@@ -10,7 +10,9 @@ func TableCachePrefix() string {
 
 // IsTableCacheKey 判断 key 是否属于当前应用的 table-cache 真实 Redis key。
 func IsTableCacheKey(key string) bool {
-	key = strings.TrimSpace(key)
+	if key == "" || key != strings.TrimSpace(key) {
+		return false
+	}
 	prefix := Prefix()
 	if prefix == "" || !strings.HasPrefix(key, prefix) {
 		return false
@@ -23,7 +25,6 @@ func IsTableCacheKey(key string) bool {
 // TrimTableCachePrefix 去掉当前应用的 table-cache 项目前缀，返回业务逻辑 key。
 // 只有当前 app_id 的 `app:{app_id}:table:` 会被截断，跨站点或直接 Redis key 会保持原样。
 func TrimTableCachePrefix(key string) string {
-	key = strings.TrimSpace(key)
 	if !IsTableCacheKey(key) {
 		return key
 	}

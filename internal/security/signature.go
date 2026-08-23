@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"api/helper"
-
 	utils "github.com/Is999/go-utils"
 	"github.com/Is999/go-utils/errors"
 )
@@ -17,12 +15,13 @@ import (
 // SignFieldAll 表示所有首层字段参与排序签名。
 const SignFieldAll = "*"
 
-// BuildSignString 使用版本化长度前缀协议生成无歧义签名串。
-// AppID、traceID、timestamp 和字段值均按 UTF-8 字节长度编码。
+// BuildSignString 按 v2 长度前缀协议生成无歧义签名串。
 func BuildSignString(data map[string]any, signParams []string, traceID, timestamp, appID string) string {
+	// 签名字段先排序，调用方顺序不影响结果。
 	params := resolveSignParams(data, signParams)
 	sort.Strings(params)
 
+	// 固定元数据按协议顺序使用 UTF-8 字节长度编码。
 	var builder strings.Builder
 	builder.WriteString("v2|app=")
 	writeSignStringPart(&builder, appID)
@@ -30,6 +29,7 @@ func BuildSignString(data map[string]any, signParams []string, traceID, timestam
 	writeSignStringPart(&builder, traceID)
 	builder.WriteString("|timestamp=")
 	writeSignStringPart(&builder, timestamp)
+	// 业务字段跳过缺失和空值，并沿用同一长度前缀。
 	for _, key := range params {
 		value, ok := SignFieldValue(data, key)
 		if !ok || isEmptySignValue(value) {
@@ -44,14 +44,16 @@ func BuildSignString(data map[string]any, signParams []string, traceID, timestam
 
 // SignFieldValue 按点路径读取参与签名的首层或嵌套字段值。
 func SignFieldValue(data map[string]any, field string) (any, bool) {
-	path := strings.Split(strings.TrimSpace(field), ".")
+	if field == "" || field != strings.TrimSpace(field) {
+		return nil, false
+	}
+	path := strings.Split(field, ".")
 	if len(path) == 0 {
 		return nil, false
 	}
 	var current any = data
 	for _, segment := range path {
-		segment = strings.TrimSpace(segment)
-		if segment == "" {
+		if segment == "" || segment != strings.TrimSpace(segment) {
 			return nil, false
 		}
 		object, ok := current.(map[string]any)
@@ -75,13 +77,13 @@ func writeSignStringPart(builder *strings.Builder, value string) {
 
 // resolveSignParams 解析签名字段列表；配置了 * 时，对当前 map 的所有首层字段签名。
 func resolveSignParams(data map[string]any, signParams []string) []string {
-	params := helper.UniqueNonEmptyStrings(signParams)
+	params := append([]string(nil), signParams...)
 	if !utils.Contains(SignFieldAll, params) {
 		return params
 	}
 	result := make([]string, 0, len(data))
 	for key := range data {
-		switch strings.TrimSpace(key) {
+		switch key {
 		case "", "sign", "ciphertext":
 			continue
 		default:
@@ -99,9 +101,9 @@ func SignValueString(value any) string {
 	case json.Number:
 		return v.String()
 	case float64:
-		return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%f", v), "0"), ".")
+		return strconv.FormatFloat(v, 'g', -1, 64)
 	case float32:
-		return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%f", v), "0"), ".")
+		return strconv.FormatFloat(float64(v), 'g', -1, 32)
 	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, bool:
 		return fmt.Sprint(v)
 	default:
@@ -159,6 +161,7 @@ func writeStableJSON(builder *strings.Builder, value any) error {
 	case nil:
 		builder.WriteString("null")
 	case string:
+		// 字符串交给标准库转义，保持控制字符的 JSON 语义。
 		body, err := json.Marshal(v)
 		if err != nil {
 			return errors.Tag(err)
@@ -167,14 +170,16 @@ func writeStableJSON(builder *strings.Builder, value any) error {
 	case bool:
 		builder.WriteString(fmt.Sprint(v))
 	case json.Number:
+		// 保留原始十进制文本，避免浮点转换改变签名内容。
 		builder.WriteString(v.String())
 	case float64:
-		builder.WriteString(strings.TrimRight(strings.TrimRight(fmt.Sprintf("%f", v), "0"), "."))
+		builder.WriteString(strconv.FormatFloat(v, 'g', -1, 64))
 	case float32:
-		builder.WriteString(strings.TrimRight(strings.TrimRight(fmt.Sprintf("%f", v), "0"), "."))
+		builder.WriteString(strconv.FormatFloat(float64(v), 'g', -1, 32))
 	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 		builder.WriteString(fmt.Sprint(v))
 	case map[string]any:
+		// map 迭代无序，签名序列化前必须固定键顺序。
 		keys := make([]string, 0, len(v))
 		for key := range v {
 			keys = append(keys, key)
@@ -197,6 +202,7 @@ func writeStableJSON(builder *strings.Builder, value any) error {
 		}
 		builder.WriteByte('}')
 	case []any:
+		// 数组保留调用方顺序，元素继续使用同一稳定编码。
 		builder.WriteByte('[')
 		for index, item := range v {
 			if index > 0 {
@@ -208,6 +214,7 @@ func writeStableJSON(builder *strings.Builder, value any) error {
 		}
 		builder.WriteByte(']')
 	default:
+		// 自定义类型先归一为基础 JSON 结构再递归编码。
 		normalized, err := normalizeStableJSONValue(v)
 		if err != nil {
 			return errors.Tag(err)
@@ -217,7 +224,7 @@ func writeStableJSON(builder *strings.Builder, value any) error {
 	return nil
 }
 
-// isEmptySignValue 判断字段是否应跳过签名。
+// isEmptySignValue 仅跳过 nil 和空字符串；数值 0 与 false 仍须签名，避免零值字段失去完整性保护。
 func isEmptySignValue(value any) bool {
 	if value == nil {
 		return true

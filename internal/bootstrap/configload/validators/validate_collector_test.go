@@ -1,6 +1,7 @@
 package validators
 
 import (
+	"fmt"
 	"testing"
 
 	"api/internal/config"
@@ -22,6 +23,31 @@ func TestValidateCollectorSkipsDisabledConfig(t *testing.T) {
 	}
 }
 
+// TestValidateCollectorRejectsUnboundedTasks 确保错误配置不会无界放大路由表和 Kafka Writer 数量。
+func TestValidateCollectorRejectsUnboundedTasks(t *testing.T) {
+	t.Run("task count", func(t *testing.T) {
+		cfg := validCollectorConfig()
+		cfg.Collector.Tasks = make(map[string]config.CollectorTaskConfig, config.MaxCollectorTaskCount+1)
+		for i := 0; i <= config.MaxCollectorTaskCount; i++ {
+			cfg.Collector.Tasks[fmt.Sprintf("biz-%d", i)] = config.CollectorTaskConfig{Topic: config.CollectorTopicAuthSecurity}
+		}
+		if err := ValidateCollector(cfg); err == nil {
+			t.Fatal("expected excessive collector tasks to be rejected")
+		}
+	})
+
+	t.Run("topic count", func(t *testing.T) {
+		cfg := validCollectorConfig()
+		cfg.Collector.Tasks = make(map[string]config.CollectorTaskConfig, config.MaxCollectorTopicCount+1)
+		for i := 0; i <= config.MaxCollectorTopicCount; i++ {
+			cfg.Collector.Tasks[fmt.Sprintf("biz-%d", i)] = config.CollectorTaskConfig{Topic: fmt.Sprintf("topic-%d", i)}
+		}
+		if err := ValidateCollector(cfg); err == nil {
+			t.Fatal("expected excessive collector topics to be rejected")
+		}
+	})
+}
+
 // TestValidateCollectorRejectsMissingKafkaBrokers 确保启用 Collector 时必须配置 Kafka broker。
 func TestValidateCollectorRejectsMissingKafkaBrokers(t *testing.T) {
 	cfg := config.Config{
@@ -34,6 +60,35 @@ func TestValidateCollectorRejectsMissingKafkaBrokers(t *testing.T) {
 	}
 	if err := ValidateCollector(cfg); err == nil {
 		t.Fatal("expected missing collector.kafka.brokers to be rejected")
+	}
+}
+
+// TestValidateCollectorRejectsNonCanonicalRoutes 确保配置错误不会被清洗为另一条 Kafka 路由。
+func TestValidateCollectorRejectsNonCanonicalRoutes(t *testing.T) {
+	tests := []struct {
+		name string               // 子场景名称
+		edit func(*config.Config) // 注入非规范配置
+	}{
+		{name: "broker 首尾空白", edit: func(cfg *config.Config) { cfg.Collector.Kafka.Brokers[0] = " 127.0.0.1:9092" }},
+		{name: "broker 重复", edit: func(cfg *config.Config) {
+			cfg.Collector.Kafka.Brokers = append(cfg.Collector.Kafka.Brokers, cfg.Collector.Kafka.Brokers[0])
+		}},
+		{name: "bizType 首尾空白", edit: func(cfg *config.Config) {
+			cfg.Collector.Tasks[" auth_security"] = cfg.Collector.Tasks[config.CollectorBizTypeAuthSecurity]
+			delete(cfg.Collector.Tasks, config.CollectorBizTypeAuthSecurity)
+		}},
+		{name: "topic 首尾空白", edit: func(cfg *config.Config) {
+			cfg.Collector.Tasks[config.CollectorBizTypeAuthSecurity] = config.CollectorTaskConfig{Topic: " auth_security_events"}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validCollectorConfig()
+			tt.edit(&cfg)
+			if err := ValidateCollector(cfg); err == nil {
+				t.Fatal("expected non-canonical collector config to be rejected")
+			}
+		})
 	}
 }
 

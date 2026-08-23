@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"os"
-	"strings"
 
 	"api/internal/config"
 
@@ -15,15 +14,18 @@ import (
 // newInternalServer 创建只承载内网路由的独立 HTTP Server。
 func newInternalServer(c config.Config) (*rest.Server, error) {
 	restConf := c.RestConf
-	restConf.Name = strings.TrimSpace(c.Name) + "-internal"
-	restConf.Host = strings.TrimSpace(c.InternalServer.Host)
+	restConf.Name = c.Name + "-internal"
+	restConf.Host = c.InternalServer.Host
 	restConf.Port = c.InternalServer.Port
-	restConf.CertFile = strings.TrimSpace(c.InternalServer.CertFile)
-	restConf.KeyFile = strings.TrimSpace(c.InternalServer.KeyFile)
+	restConf.CertFile = c.InternalServer.CertFile
+	restConf.KeyFile = c.InternalServer.KeyFile
 	restConf.Middlewares.Log = false
+	// 内网同样由项目 Trace 继承请求链路，避免框架提前覆盖 X-Trace-Id。
+	restConf.Middlewares.Trace = false
 
 	options := make([]rest.RunOption, 0, 1)
-	if strings.TrimSpace(c.InternalServer.ClientCAFile) != "" {
+	if c.InternalServer.ClientCAFile != "" {
+		// 证书在监听前读取校验，文件错误由 bootstrap 返回而不是延迟到 TLS 启动。
 		if _, err := tls.LoadX509KeyPair(restConf.CertFile, restConf.KeyFile); err != nil {
 			return nil, errors.Wrap(err, "加载内网服务端证书失败")
 		}
@@ -42,7 +44,7 @@ func newInternalServer(c config.Config) (*rest.Server, error) {
 
 // internalServerTLSConfig 加载客户端 CA，并强制校验 mTLS 客户端证书。
 func internalServerTLSConfig(clientCAFile string) (*tls.Config, error) {
-	caPEM, err := os.ReadFile(strings.TrimSpace(clientCAFile))
+	caPEM, err := os.ReadFile(clientCAFile)
 	if err != nil {
 		return nil, errors.Wrap(err, "读取内网客户端 CA 文件失败")
 	}

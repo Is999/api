@@ -1,19 +1,34 @@
-name: api-integration
+# Compose 项目名固定，便于本地清理测试资源。
+name: api-go-integration
 
+# 集成环境只启动真实 MySQL 依赖。
 services:
+  # MySQL 用于验证 DDL、锁等待和迁移幂等。
   mysql:
+    # 与 CI 集成测试使用相同主版本。
     image: mysql:8.0
+    # 凭据只供本地一次性集成环境使用。
     environment:
+      # 临时 root 密码，不对应部署环境。
       MYSQL_ROOT_PASSWORD: password
-      MYSQL_DATABASE: api
+      # 容器首次启动创建的独占空库；迁移夹具要求 _test 后缀并拒绝已有目标表。
+      MYSQL_DATABASE: api_test
+      # 数据库时区与开发环境保持一致。
       TZ: Asia/Shanghai
+    # 字符集与生产初始化资产保持一致。
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
+    # 宿主机 3311 端口仅供本地集成测试连接。
     ports:
-      - "3311:3306"
+      - "127.0.0.1:3311:3306"
+    # mysqladmin 成功后才允许测试开始。
     healthcheck:
+      # 使用容器内回环地址探测服务。
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ppassword"]
+      # 每五秒探测一次。
       interval: 5s
+      # 单次探测三秒超时。
       timeout: 3s
+      # 最多重试二十次，覆盖首次初始化时间。
       retries: 20

@@ -1,38 +1,90 @@
+# Prometheus 规则组由 promtool 在 CI 中校验。
 groups:
+  # api 组收口前台服务的业务告警。
   - name: api
+    # 每条规则只使用本服务真实导出的低基数指标。
     rules:
+      # Collector 连续出现 Kafka 发布失败时告警。
       - alert: GozeroApiCollectorKafkaPublishFailed
+        # 五分钟失败速率大于零即进入等待状态。
         expr: sum(rate(api_collector_kafka_publish_events_total{result="failed"}[5m])) > 0
+        # 持续十分钟才触发，过滤短暂抖动。
         for: 10m
+        # 发布失败暂定为 warning。
         labels:
+          # warning 由值班流程跟进，不直接触发最高级响应。
           severity: warning
+        # 文案描述 Collector Kafka 写入失败。
         annotations:
+          # 告警列表使用的简短标题。
           summary: "api Collector Kafka publish failed"
+          # 告警详情说明失败对象。
           description: "Collector has failed Kafka publish events."
 
-      - alert: GozeroApiIDGenerateFailed
-        expr: sum by (job, instance, biz_type, strategy) (rate(api_idgen_generated_total{result!="success"}[5m])) > 0
+      # 登录成功后的限流状态清理失败时告警。
+      - alert: GozeroApiAuthRateLimitCleanupFailed
+        # 五分钟内出现清理失败即进入等待状态。
+        expr: sum(rate(api_auth_rate_limit_cleanup_failures_total[5m])) > 0
+        # 连续五分钟才触发。
         for: 5m
+        # 清理失败不阻断登录，按 warning 处理。
         labels:
-          severity: critical
+          # warning 提示检查 Redis 清理链路。
+          severity: warning
+        # 文案明确成功登录后的清理阶段。
         annotations:
+          # 告警列表标题。
+          summary: "api authentication rate-limit cleanup failed"
+          # 告警详情说明残留状态风险。
+          description: "Login succeeded but Redis rate-limit state cleanup has failed."
+
+      # 任一 ID 策略持续生成失败时告警。
+      - alert: GozeroApiIDGenerateFailed
+        # 按实例、业务类型和策略聚合失败速率。
+        expr: sum by (job, instance, biz_type, strategy) (rate(api_idgen_generated_total{result!="success"}[5m])) > 0
+        # 连续五分钟失败才触发。
+        for: 5m
+        # ID 生成失败会阻断写入，按 critical 处理。
+        labels:
+          # critical 需要立即排查租约或 Redis。
+          severity: critical
+        # 文案保留实例和业务维度。
+        annotations:
+          # 告警列表标题。
           summary: "api ID generation failed"
+          # 告警详情展示聚合标签。
           description: "instance={{ $labels.instance }} ID biz_type={{ $labels.biz_type }} strategy={{ $labels.strategy }} has generation failures."
 
+      # Segment 本地剩余号段不足且仍在发号时告警。
       - alert: GozeroApiIDSegmentRemainingLow
+        # 只对十分钟内仍有成功发号的活跃业务判断余量。
         expr: (api_idgen_segment_remaining < 100) and on (job, instance, biz_type) (sum by (job, instance, biz_type) (rate(api_idgen_generated_total{strategy="segment",result="success"}[10m])) > 0)
+        # 低水位持续五分钟才触发。
         for: 5m
+        # 号段尚未耗尽，按 warning 提前处理。
         labels:
+          # warning 提示检查 Redis 分配速度。
           severity: warning
+        # 文案包含实例和业务空间。
         annotations:
+          # 告警列表标题。
           summary: "api ID Segment local range is low"
+          # 告警详情说明阈值和活跃条件。
           description: "instance={{ $labels.instance }} ID Segment biz_type={{ $labels.biz_type }} local range is below 100 while still generating IDs."
 
+      # 雪花租约丢失或续租超时后告警。
       - alert: GozeroApiSnowflakeLeaseLost
+        # 仅聚合会停止本地发号的两类事件。
         expr: sum by (job, instance, biz_type, event) (rate(api_idgen_snowflake_lease_events_total{event=~"lost|renew_timeout"}[5m])) > 0
+        # 持续一分钟即触发。
         for: 1m
+        # 租约丢失会阻断对应业务发号，按 critical 处理。
         labels:
+          # critical 需要检查 Redis 和实例所有权。
           severity: critical
+        # 文案包含实例、业务和租约事件。
         annotations:
+          # 告警列表标题。
           summary: "api Snowflake lease lost"
+          # 告警详情展示实际事件标签。
           description: "instance={{ $labels.instance }} Snowflake biz_type={{ $labels.biz_type }} event={{ $labels.event }} detected."

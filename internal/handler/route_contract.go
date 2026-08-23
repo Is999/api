@@ -8,6 +8,7 @@ type RouteContract struct {
 	Path          string           // HTTP 路径
 	Meta          shared.RouteMeta // 路由元数据
 	DocumentPath  string           // 仓库根目录下的接口文档路径
+	InternalOnly  bool             // 是否只在内网监听器注册
 	SkipAccessLog bool             // 是否跳过普通访问日志
 }
 
@@ -21,6 +22,7 @@ func DefaultRouteContracts() []RouteContract {
 			Path:          spec.Path,
 			Meta:          spec.Meta,
 			DocumentPath:  spec.DocumentPath,
+			InternalOnly:  spec.InternalOnly,
 			SkipAccessLog: spec.SkipAccessLog,
 		})
 	}

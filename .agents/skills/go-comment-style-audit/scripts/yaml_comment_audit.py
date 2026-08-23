@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that project-owned YAML mapping fields have adjacent Chinese comments."""
+"""检查项目自有 YAML 固定字段的紧邻中文注释，不代替源码语义复核。"""
 
 import argparse
 import os
@@ -12,7 +12,7 @@ SKIP_DIRS = {".git", "bin", "build", "coverage", "dist", "node_modules", "vendor
 
 
 def mapping_field(line: str):
-    """Return key, indentation and value for a block-style YAML mapping field."""
+    """识别块式 mapping，引号内冒号不作为字段分隔符。"""
     indent = len(line) - len(line.lstrip(" "))
     content = line[indent:]
     if not content or content.startswith(("#", "---", "...", "%")):
@@ -36,6 +36,7 @@ def mapping_field(line: str):
         if index + 1 < len(content) and not content[index + 1].isspace():
             continue
         key = content[:index].strip()
+        # 流式集合和显式复杂键不在逐行检查范围，需要单独复核。
         if not key or key.startswith(("{", "[", "?")):
             return None
         if key[:1] == key[-1:] and key[:1] in ("'", '"'):
@@ -45,7 +46,7 @@ def mapping_field(line: str):
 
 
 def has_adjacent_chinese_comment(lines, index: int, indent: int) -> bool:
-    """Require the immediately preceding line to be a same-indent Chinese comment."""
+    """只接受字段上一行、同缩进的中文注释，父节点和行尾说明不能替代。"""
     if index == 0:
         return False
     previous = lines[index - 1]
@@ -58,8 +59,9 @@ def has_adjacent_chinese_comment(lines, index: int, indent: int) -> bool:
 
 
 def scan_lines(lines, dynamic_parents=()):
-    """Return line, field path and message for missing YAML field comments."""
+    """按缩进还原字段路径；动态父节点只豁免其直接数据项。"""
     dynamic = set(dynamic_parents)
+    # 路径仅按源码缩进定位，不展开锚点、别名或合并后的有效配置。
     stack = []
     findings = []
     block_indent = None
@@ -67,6 +69,7 @@ def scan_lines(lines, dynamic_parents=()):
     for index, line in enumerate(lines):
         stripped = line.strip()
         indent = len(line) - len(line.lstrip(" "))
+        # 多行字符串中的冒号属于内容，不能当成新的配置字段。
         if block_indent is not None:
             if not stripped or indent > block_indent:
                 continue
@@ -92,7 +95,7 @@ def scan_lines(lines, dynamic_parents=()):
 
 
 def yaml_files(paths):
-    """Yield explicit YAML files and YAML files below explicit directories."""
+    """只遍历指定路径，缺失目标报错而不是作为零缺口通过。"""
     for raw_path in paths:
         path = Path(raw_path)
         if path.is_file():
@@ -110,7 +113,7 @@ def yaml_files(paths):
 
 
 def main(argv=None) -> int:
-    """Run the YAML comment audit and return a process exit code."""
+    """默认以非零退出码报告缺口；建议模式只输出问题，不阻断命令。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", help="project-owned YAML file or directory")
     parser.add_argument(

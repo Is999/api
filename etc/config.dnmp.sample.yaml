@@ -1,20 +1,20 @@
 # api DNMP 本地配置示例。
 
 # go-zero HTTP 基础配置。
-# 服务名称，用于日志、监控和服务标识。
+# go-zero 服务名称，用于日志与监控标识；变更需重启。
 Name: "api"
-# HTTP 服务监听地址。
+# go-zero 公网监听地址；缺省为 0.0.0.0，变更需重启。
 Host: "0.0.0.0"
-# HTTP 服务监听端口。
+# 公网 HTTP 端口，必须为 1-65535 且不同于内网端口；变更需重启。
 Port: 8890
-# 服务环境：dev / test / rt / pre / pro。
+# go-zero 服务环境，仅允许 dev/test/rt/pre/pro；缺省 pro，同时派生观测环境，变更需重启。
 Mode: "dev"
-# HTTP 接口统一响应超时，单位毫秒。
+# go-zero 请求超时毫秒数；缺省 3000，非正值不启用超时中间件，变更需重启。
 Timeout: 30000
-# HTTP 请求体最大字节数。
+# go-zero 请求体字节上限；缺省 1048576，变更需重启。
 MaxBytes: 10485760
 
-# DNMP 开发环境内网接口独立监听器；端口只应在容器网络内暴露。
+# DNMP 开发环境内网接口独立监听器；端口只应在容器网络内暴露。 变更需重启。
 internal_server:
   # 内网路由监听 IP；DNMP 使用容器通配地址，生产禁止通配地址，变更后必须重启。
   host: "0.0.0.0"
@@ -27,42 +27,42 @@ internal_server:
   # mTLS 客户端 CA 文件；配置后内网监听器强制校验客户端证书，必须与 cert_file、key_file 成组配置，变更后必须重启。
   client_ca_file: ""
 
-# 站点/应用 ID，用于 Redis Key 命名空间。
+# 站点/应用 ID，必填且限 1-64 字节字母数字及 ._-，用于 Redis Key 命名空间，变更需重启。
 app_id: "1"
-# 应用密钥仅供本地示例使用，部署前必须替换。
+# 联系方式加密与查询哈希根密钥；所有模式必填、至少 16 字节且无首尾空白，部署须替换本地示例；已有数据须先交付回填/回滚方案再换 key，变更需重启。
 app_key: "dnmp-local-app-key-please-change"
-# 当前实例 ID，本地固定便于日志排查。
+# API 实例标识；空值使用主机名，显式值限 1-64 字节字母数字及 ._-，本地固定便于排查，变更需重启。
 instance_id: "local-api-1"
-# 可信反向代理 IP/CIDR；空列表仅信任本机回环代理。
+# 可信反向代理 IP/CIDR；空列表仅信任本机回环代理。 变更需重启。
 trusted_proxies: []
 
-# 基于 github.com/bwmarrin/snowflake 的分布式雪花 ID；多实例通过 Redis 租约自动分配 node_id。
+# 基于 github.com/bwmarrin/snowflake 的分布式雪花 ID；多实例通过 Redis 租约自动分配 node_id。 变更需重启。
 snowflake:
-  # Redis node_id 租约配置；生产多实例建议开启。
+  # Redis node_id 租约配置；生产多实例建议开启。 变更需重启。
   redis:
-    # 是否启用 Redis 租约自动分配 node_id。
+    # 雪花 Redis 租约开关；缺省 false，启用后按业务命名空间申请 node_id，变更需重启。
     enabled: true
-    # node_id 租约作用域；同一套 api/admin 部署必须一致。
+    # 雪花租约作用域；空值使用 default，限 64 字节字母数字及 ._-，同库写入方必须一致，变更需重启。
     scope: "main"
-    # node_id 租约 TTL，单位秒。
+    # 雪花 node_id 租约秒数；0 使用 120，启用时允许 10-86400，变更需重启。
     lease_seconds: 120 # 允许 10-86400 秒。
-    # node_id 租约续期间隔，单位秒，必须小于 lease_seconds 的一半。
+    # 雪花 node_id 续租秒数；0 使用 30，启用时必须为正且小于 lease_seconds/2，变更需重启。
     renew_interval_seconds: 30
-    # 按业务 namespace 限制可竞争 node_id 池大小；未配置时使用完整 0-1023。
+    # 雪花节点池映射；key 为唯一的 1-64 字节小写字母数字及 ._- 业务名，value.node_count 为 0-1024，空表或 0 使用完整池，整体替换且需重启。
     namespaces:
-      # 用户 ID 生成统一限制为 10 个 node_id；api/admin 写同一用户表必须一致。
+      # 用户 ID 生成统一限制为 10 个 node_id；api/admin 写同一用户表必须一致。 变更需重启。
       user:
-        # 当前 namespace 可竞争的 node_id 数量，取值 1-1024；0 表示完整池。
+        # 用户发号可竞争 node_id 数；0 使用完整 1024 节点池，允许 1-1024，两仓同表写入必须一致，变更需重启。
         node_count: 10
-  # 高吞吐业务可按 namespace 启用 Redis Segment 本地号段；默认关闭，普通业务继续走雪花。
+  # 高吞吐业务可按 namespace 启用 Redis Segment 本地号段；默认关闭，普通业务继续走雪花。 变更需重启。
   segment:
-    # 是否启用 Redis Segment 本地号段策略。
+    # Segment 发号开关；缺省 false，启用时必须声明至少一个启用的 namespace，变更需重启。
     enabled: false
-    # Segment 高水位作用域，默认与 snowflake.redis.scope 保持一致。
+    # Segment 高水位作用域；空值继承 snowflake.redis.scope，再为空使用 default，限 64 字节字母数字及 ._-，变更需重启。
     scope: "main"
-    # Redis 申请号段超时时间，单位秒。
+    # Segment 单次申请超时秒数；0 使用 2，启用时允许 1-30，变更需重启。
     allocate_timeout_seconds: 2
-    # 按业务 namespace 配置号段策略；空对象表示未启用具体业务。
+    # Segment 策略映射；key 为唯一的 1-64 字节小写字母数字及 ._- 业务名，value 定义启用/段长/预取/起点；空表不启用，总开关启用时至少启用一项，整体替换且需重启。
     namespaces: {}
     # 示例：
     # namespaces:
@@ -78,184 +78,190 @@ snowflake:
 
 # 业务用户物理表路由配置。
 user:
-  # 当前用户物理表数量，仅支持 1/2/4/.../1024；Admin/API 必须保持一致。
+  # 用户物理分片数；0 使用 1，只允许 1/2/4/.../1024，两仓同表写入必须一致，变更需重启。
   route_shard_count: 1
 
-# JWT 密钥仅供本地示例使用，部署前必须替换。
+# JWT 签名密钥；必填、至少 16 字节且无首尾空白，本地示例部署前必须替换并保持多实例一致，变更需重启。
 jwt_secret: "please-change-this-jwt-secret"
-# JWT 过期时间，单位秒。
+# JWT 与 Redis 登录态过期时间，单位秒；0 使用 86400，允许范围 1-2592000，修改后需重启。
 jwt_expires_in: 86400
 
 # 本地默认开启配置热加载，修改运行期配置后无需重启即可生效。
 hot_reload:
-  # 是否启用配置热加载。
+  # 文件轮询开关；缺省 false，可由手工 reload 开启，关闭后需手工 reload 或重启再开启。
   enabled: true
-  # 配置文件轮询间隔，单位秒。
+  # 配置文件轮询间隔，单位秒；0 使用 5 秒，允许 1-3600，首轮立即检查，后续间隔支持热加载。
   check_interval_seconds: 5
 
 # 可选外部配置入口，留空时只读取 -f 指定的主配置。
 config_files:
-  # 运行期配置文件路径。
+  # 外置运行期文件路径；空值不加载，相对主配置目录解析，仅 auth/hot_reload/security/collector/ops 整章覆盖，路径及内容参与热加载。
   runtime: ""
 
 # 前台认证配置。
 auth:
-  # 是否开放注册接口，本地默认开启。
+  # 注册接口开关；缺省 false，本地示例显式开启，生产开启时必须同时启用 register_rate_limit，支持热加载。
   register_enabled: true
-  # JWT iss 签发方；空值回退顶层 name，签发与验签必须一致，修改后重启进程。
+  # JWT iss 签发方；空值继承顶层 Name，签发验签必须一致，变更需重启。
   issuer: "api"
-  # Redis 会话 TTL；<=0 或超过 jwt_expires_in 时使用 jwt_expires_in。
+  # Redis 会话秒数；0 或超过 jwt_expires_in 时使用 jwt_expires_in，负数拒绝，支持热加载。
   session_ttl_seconds: 86400
-  # 用户资料缓存 TTL。
+  # 用户资料缓存秒数；0 使用 300，允许 1-86400，支持热加载。
   profile_cache_ttl_seconds: 300
-  # 密码最小长度。
+  # 注册密码最少 Unicode 字符数；0 使用 8，允许 6-72，另受 bcrypt 的 72 字节上限约束，支持热加载。
   password_min_length: 8
   # 登录入口限流，按 IP 和用户名分别计数。
   login_rate_limit:
-    # 是否启用登录限流。
+    # 登录限流开关；缺省 false，生产必须 true；关闭时跳过子参数校验，支持热加载。
     enabled: true
-    # 限流统计窗口，单位秒。
+    # 登录限流统计窗口，单位秒；启用时允许 0-3600，0 使用 60，支持热加载。
     window_seconds: 60
-    # 窗口内最大失败次数。
+    # 登录窗口内最大失败次数；启用时允许 0-1000，0 使用 5，支持热加载。
     max_attempts: 10
-    # 命中限流后的锁定时间，单位秒。
+    # 登录锁定秒数；启用时允许 0-86400，0 使用统计窗口，支持热加载。
     lock_seconds: 120
   # 注册入口限流，按 IP 计数。
   register_rate_limit:
-    # 是否启用注册限流。
+    # 注册限流开关；缺省 false，生产开放注册时必须 true；关闭时跳过子参数校验，支持热加载。
     enabled: true
-    # 限流统计窗口，单位秒。
+    # 注册限流统计窗口，单位秒；启用时允许 0-3600，0 使用 60，支持热加载。
     window_seconds: 60
-    # 窗口内最大尝试次数。
+    # 注册窗口内最大请求次数；启用时允许 0-1000，0 使用 3，支持热加载。
     max_attempts: 5
-    # 命中限流后的锁定时间，单位秒。
+    # 注册锁定秒数；启用时允许 0-86400，0 使用统计窗口，支持热加载。
     lock_seconds: 180
 
-# 本地日志配置。
+# 本地日志配置。 变更需重启。
 log:
-  # 日志级别：debug / info / warn / error。
+  # go-zero 日志级别：debug/info/error/severe，缺省 info；变更需重启。
   level: "debug"
-  # 输出模式：console / file。
+  # go-zero 日志输出模式：console/file/volume，缺省 console；变更需重启。
   mode: "console"
-  # 编码格式：plain / json。
+  # go-zero 日志编码：plain/json，缺省 json；变更需重启。
   encoding: "plain"
 
-# 可观测性配置。
+# 可观测性配置。 变更需重启。
 observability:
-  # 可观测性服务名。
+  # OTel 服务名；空值继承顶层 Name，变更需重启。
   service_name: "api"
-  # 是否启用 trace 上报。
+  # 观测 trace 开关；缺省 false，仅有非空 OTLP 地址时外发，变更需重启。
   trace_enabled: true
-  # OTLP 上报协议：grpc/http-protobuf；为空默认 grpc。
+  # OTLP 上报协议：仅支持 grpc/http；为空默认 grpc，修改后必须重启。
   otlp_protocol: "grpc"
-  # OTLP 上报地址；为空表示不上报到外部 collector。
+  # OTLP 上报地址；仅接受 host:port，为空表示不上报到外部 collector。 变更需重启。
   otlp_endpoint: ""
-  # 是否使用明文连接 OTLP。
+  # OTLP 明文连接开关；缺省 false 使用 TLS，变更需重启。
   otlp_insecure: true
-  # trace 采样率，0~1。
+  # trace 采样比例 0-1；缺省 1，显式 0 不采样，变更需重启。
   sample_ratio: 1
-  # 慢 SQL 阈值，单位毫秒。
+  # GORM 慢 SQL 阈值毫秒数；0 关闭，允许 1-60000，变更需重启。
   slow_sql_ms: 300
-  # 慢 Redis 阈值，单位毫秒。
+  # Redis 慢命令阈值毫秒数；0 关闭，允许 1-60000，变更需重启。
   redis_slow_ms: 80
-  # 请求/审计日志中请求体最大保留字节数。
-  log_body_max_bytes: 4096
 
-# 外部运行异常告警，当前支持 Lark 群机器人。
+# 外部运行异常告警，当前支持 Lark 群机器人。 变更需重启。
 alert:
-  # Lark 群机器人告警配置。
+  # Lark 群机器人告警配置。 变更需重启。
   lark:
-    # 是否启用 Lark 告警。
+    # Lark 外部通知开关；缺省 false，变更需重启。
     enabled: false
-    # Lark webhook URL；为空时读取 webhook_url_ref。
+    # Lark webhook 敏感 URL；启用时与 webhook_url_ref 必须且只能配置一个，变更需重启。
     webhook_url: ""
-    # Lark webhook URL 文件路径。
+    # Lark webhook 文件路径；启用时与 webhook_url 二选一，文件内容不进入日志，变更需重启。
     webhook_url_ref: ""
-    # Lark 签名密钥；为空时读取 secret_ref。
+    # Lark 可选签名密钥；与 secret_ref 互斥，两者为空时不签名，轮换需重启。
     secret: ""
-    # Lark 签名密钥文件路径。
+    # Lark 可选签名密钥文件；与 secret 互斥，两者为空时不签名，轮换需重启。
     secret_ref: ""
-    # HTTP 请求超时，单位秒。
+    # Lark HTTP 请求超时秒数；0 使用 5，启用时允许 1-30，变更需重启。
     timeout_seconds: 5
-    # 是否在告警中 @所有人。
+    # Lark 告警卡片是否 @所有人；缺省 false，变更需重启。
     at_all: false
-    # 错误摘要最大字节数。
+    # Lark 错误摘要字节上限；0 使用 800，负数拒绝，变更需重启。
     max_error_bytes: 800
 
-# 签名验签和加解密配置。未配置密钥时按普通请求处理；配置后启动期会校验版本路由和 AES/RSA 材料。
+# 签名验签和字段级认证加密配置；启用加密时必须同时启用签名，启动期会校验版本路由和对称/RSA 材料。 变更需重启。
 security:
-  # 空对象表示关闭签名验签和加解密。
+  # 空对象表示关闭签名验签和加解密。 变更需重启。
   secret_key: {}
 # 启用示例：
 # security:
 #   secret_key:
-#     # 密钥版本，对应 X-Key-Version。
-#     key_version: "v1"
-#     # 签名验签状态：1启用，0停用；与加密解密开关独立。
+#     # 稳定密钥版本；必须存在于 versions，修改后必须重启。
+#     stable_version: "v1"
+#     # 签名验签状态：1启用，0停用；可单独启用，加密开启时必须为 1。
 #     sign_status: 1
-#     # 加密解密状态：1启用，0停用；与签名验签开关独立。
+#     # 字段加密解密状态：1启用，0停用；为 1 时 sign_status 必须为 1。
 #     crypto_status: 1
-#     # stable_version: "v1"
+#     # 灰度密钥版本；为空不启用灰度，非空时必须存在于 versions。
 #     # gray_version: "v2"
+#     # 灰度流量百分比，范围 0-100；大于 0 时必须配置 gray_version。
 #     # gray_percent: 10
+#     # 灰度哈希盐；生产环境 gray_percent 大于 0 时必填。
 #     # gray_salt: "local-gray-salt"
-#     aes_key_ref: "./etc/secrets/aes_key"
-#     aes_iv_ref: "./etc/secrets/aes_iv"
-#     rsa_public_key_user_ref: "./etc/secrets/rsa_public_key_user.pem"
-#     rsa_private_key_server_ref: "./etc/secrets/rsa_private_key_server.pem"
+#     # 版本材料列表；key_version 唯一，稳定版和灰度版均必须在此定义。
+#     versions:
+#       # 请求头 X-Key-Version 使用的版本号，不能包含空白或通配符。
+#       - key_version: "v1"
+#         # AES-GCM/HMAC 主密钥文件路径；仅普通文件且最多 64 KiB，允许普通文件符号链接；修剪首尾空白后须为 16、24 或 32 字节，与 aes_key 二选一，修改需重启。
+#         aes_key_ref: "./etc/secrets/aes_key"
+#         # 用户 RSA 公钥文件路径；仅普通文件且最多 64 KiB，允许普通文件符号链接；至少 2048 位，用于 RSA-SHA256 请求验签和 OAEP-SHA256 响应加密，与明文二选一，修改需重启。
+#         rsa_public_key_user_ref: "./etc/secrets/rsa_public_key_user.pem"
+#         # 服务端 RSA 私钥文件路径；仅普通文件且最多 64 KiB，允许普通文件符号链接；至少 2048 位，用于 OAEP-SHA256 请求解密和 RSA-SHA256 响应回签，与明文二选一，修改需重启。
+#         rsa_private_key_server_ref: "./etc/secrets/rsa_private_key_server.pem"
 
-# 通用收集器；API 只负责把结构化事件投递到 Kafka，Admin Worker 负责消费闭环。
+# 通用收集器；API 只负责把结构化事件投递到 Kafka，Admin Worker 负责消费闭环。 变更需重启。
 collector:
-  # DNMP 默认启用，用于联调真实认证风控链路。
+  # Collector 开关；缺省 false，DNMP 示例显式开启，生产必须 true；关闭时跳过子参数校验，变更需重启。
   enabled: true
-  # Kafka 正常链路配置。
+  # Kafka 正常链路配置。 变更需重启。
   kafka:
-    # Kafka broker 地址列表。
+    # Collector Kafka broker 地址列表；启用时不能为空，不得有空项、重复或首尾空白，整体替换且需重启。
     brokers:
       - "127.0.0.1:29092"
-    # Producer 写入批次大小，不表示业务批处理触发规则。
+    # Collector Producer 单批条数；0 使用 500，启用时允许 1-5000，变更需重启。
     write_batch_size: 500
-    # Producer 写入批次等待时间，单位毫秒；业务批处理规则在消费端配置。
+    # Collector Producer 聚合等待毫秒数；0 使用 20，启用时允许 1-5000，变更需重启。
     write_batch_wait_milliseconds: 20
-    # Producer 写入超时时间，单位秒。
+    # Collector Producer 写超时秒数；0 使用 3，启用时允许 1-30，变更需重启。
     write_timeout: 3
-  # 按 bizType 显式配置投递 Topic；key 必须等于 Event.BizType。
+  # Collector 投递映射；唯一 Event.BizType 映射非空 Topic，启用时不得为空，最多 256 项/64 Topic，整体替换且需重启。
   tasks:
-    # 前台认证风控事件。
+    # 前台认证风控事件。 变更需重启。
     auth.security:
-      # 固定 Kafka Topic，必须与 Admin auth.security 消费任务一致。
+      # 固定 Kafka Topic，必须与 Admin auth.security 消费任务一致。 变更需重启。
       topic: "api_collector_auth_security_events"
 
 # 运维级接口保护；本地内网接口校验 token、时间戳、随机 nonce、请求体摘要和 HMAC。
 ops:
-  # 本地运维令牌，对应请求头 X-Ops-Token 和 HMAC 密钥。
+  # 运维接口 X-Ops-Token 和 HMAC 密钥；所有模式至少 16 字节且无首尾空白，生产须替换本地示例，支持热加载。
   config_reload_token: "dnmp-local-ops-token"
-  # 运维接口允许的 IP 或 CIDR 白名单。
+  # 运维来源白名单；仅允许回环/私网 IP 或整体落于该范围的 CIDR，不得有空项、重复或首尾空白；空表允许全部回环/私网，整体替换且支持热加载。
   config_reload_allowed_ips:
     - "127.0.0.1"
     - "::1"
 
-# 本地 MySQL 读写分离配置。
+# 本地 MySQL 读写分离配置。 变更需重启。
 mysql:
-  # 主库 DSN。
+  # GORM 主库 DSN，必须显式包含库名；含凭据，不得公开，变更需重启。
   write_data_source: "root:password@tcp(127.0.0.1:3307)/api?charset=utf8mb4&parseTime=true&loc=Local"
-  # 读库 DSN 列表；不需要读写分离时留空。
+  # 读库 DSN 列表；最多 8 个，不得为空、重复或等于写库，不需要读写分离时留空。 变更需重启。
   read_data_sources:
     - "root:password@tcp(127.0.0.1:3308)/api?charset=utf8mb4&parseTime=true&loc=Local"
-  # 最大打开连接数。
+  # 最大打开连接数，范围 1-1000；禁止 0 值无限连接池。 变更需重启。
   max_open_conns: 20
-  # 最大空闲连接数。
+  # 最大空闲连接数，范围 0-max_open_conns。 变更需重启。
   max_idle_conns: 10
-  # 单个连接最大存活时间，单位秒。
+  # 单个连接最大存活时间，单位秒，范围 1-86400。 变更需重启。
   conn_max_lifetime: 300
-  # 是否开启 SQL 调试日志。
+  # GORM SQL 调试日志开关；缺省 false，日志可能含业务数据，变更需重启。
   debug: false
 
-# 本地 Redis Cluster 配置。
+# 本地 Redis Cluster 配置。 变更需重启。
 redis:
-  # Redis 模式：single=单节点，cluster=集群。
+  # Redis 模式必须显式为 single/cluster；单节点只允许一个地址，cluster 的 DB 必须为 0，变更需重启。
   type: "cluster"
-  # Redis 节点地址列表；单机填 1 个，集群可填多个。
+  # Redis 种子地址列表；single 恰好 1 个，cluster 最多 32 个，不得为空或重复，变更需重启。
   addrs:
     - "127.0.0.1:7001"
     - "127.0.0.1:7002"
@@ -263,17 +269,23 @@ redis:
     - "127.0.0.1:7004"
     - "127.0.0.1:7005"
     - "127.0.0.1:7006"
-  # Redis Cluster 地址改写表；key 为唯一的节点公告主机名，value 为当前进程可达主机/IP，条目顺序无意义；空表不改写，仅 cluster 模式允许配置，且不参与运行期热加载。
+  # Redis Cluster 公告地址映射；唯一主机名映射可达主机/IP，最多 256 项，空表不改写，仅 cluster 可用，整体替换且需重启。
   addr_map:
+    # 集群节点 7001 回写为宿主机访问地址。 变更需重启。
     redis-cluster-7001: "127.0.0.1"
+    # 集群节点 7002 回写为宿主机访问地址。 变更需重启。
     redis-cluster-7002: "127.0.0.1"
+    # 集群节点 7003 回写为宿主机访问地址。 变更需重启。
     redis-cluster-7003: "127.0.0.1"
+    # 集群节点 7004 回写为宿主机访问地址。 变更需重启。
     redis-cluster-7004: "127.0.0.1"
+    # 集群节点 7005 回写为宿主机访问地址。 变更需重启。
     redis-cluster-7005: "127.0.0.1"
+    # 集群节点 7006 回写为宿主机访问地址。 变更需重启。
     redis-cluster-7006: "127.0.0.1"
-  # Redis 认证密码；无密码可留空。
+  # Redis 连接认证密码；无认证时留空，不得写入公开配置，轮换需重启。
   password: ""
-  # Redis DB 编号；Cluster 模式通常固定为 0。
+  # Redis DB 编号必须非负；cluster 模式只允许 0，修改后需重启。
   db: 0
-  # Redis 连接池大小。
+  # Redis 每节点连接池容量；必须为 1-1000，Cluster 对每节点分别应用，变更需重启。
   pool_size: 20

@@ -61,6 +61,7 @@ func (s *runtimeAlertSink) notify(ctx context.Context, alert larkx.RuntimeAlert)
 		return
 	}
 	alert = s.prepare(alert)
+	// 限频只保护外部通知，不改变触发告警的原业务结果。
 	if !s.shouldSend(&alert) {
 		return
 	}
@@ -133,6 +134,7 @@ func (s *runtimeAlertSink) shouldSend(alert *larkx.RuntimeAlert) bool {
 		return false
 	}
 	alert.TriggerCount = state.SuppressedCount + 1
+	// 窗口结束后的首张卡片带上压制次数，并开始新的计数窗口。
 	s.states[key] = runtimeAlertState{LastSentAt: now}
 	return true
 }

@@ -9,7 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// MetricsHandler 返回 Prometheus 指标抓取入口。
+// MetricsHandler 提供原始 Prometheus 格式，访问隔离由内网监听器注册边界保证。
 func MetricsHandler() http.HandlerFunc {
 	handler := promhttp.Handler()
 	return func(w http.ResponseWriter, r *http.Request) {

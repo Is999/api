@@ -32,12 +32,17 @@ func TestAuthReqValidate(t *testing.T) {
 	if registerReq.Username != "demo_user" || registerReq.Nickname != "Demo" || registerReq.Email != "demo@example.com" || registerReq.Phone != "13800138000" {
 		t.Fatalf("RegisterReq.Validate() did not trim fields: %+v", registerReq)
 	}
+	// 用户名按字符计数，密码受 bcrypt 的 72 字节限制，两者不能共用长度口径。
+	if err := (&RegisterReq{Username: "测试用户", Password: "secret123"}).Validate(); err != nil {
+		t.Fatalf("RegisterReq.Validate() should count a multibyte username by characters: %v", err)
+	}
 
 	cases := []struct {
-		name string       // name 表示测试场景名称。
-		req  *RegisterReq // req 表示测试字段。
+		name string       // 标明本次越界的字段，失败时可直接定位限制项
+		req  *RegisterReq // 仅保留一个非法字段，避免其他校验提前遮蔽目标分支
 	}{
 		{name: "用户名过短", req: &RegisterReq{Username: "ab", Password: "secret123"}},
+		{name: "多字节用户名过长", req: &RegisterReq{Username: strings.Repeat("用", authUsernameMaxLength+1), Password: "secret123"}},
 		{name: "密码为空", req: &RegisterReq{Username: "demo_user", Password: "   "}},
 		{name: "密码超过bcrypt字节上限", req: &RegisterReq{Username: "demo_user", Password: strings.Repeat("密", 25)}},
 		{name: "昵称过长", req: &RegisterReq{Username: "demo_user", Password: "secret123", Nickname: strings.Repeat("名", authNicknameMaxLength+1)}},
@@ -52,12 +57,23 @@ func TestAuthReqValidate(t *testing.T) {
 		})
 	}
 
-	loginReq := &LoginReq{IdentityType: " username ", IdentityValue: " demo_user ", Password: "secret123"}
+	loginReq := &LoginReq{IdentityType: LoginIdentityTypeUsername, IdentityValue: " demo_user ", Password: "secret123"}
 	if err := loginReq.Validate(); err != nil {
 		t.Fatalf("LoginReq.Validate() error = %v", err)
 	}
 	if loginReq.IdentityType != LoginIdentityTypeUsername || loginReq.IdentityValue != "demo_user" {
 		t.Fatalf("LoginReq.Validate() identity = %s:%s, want username:demo_user", loginReq.IdentityType, loginReq.IdentityValue)
+	}
+	for _, identityType := range []string{" username ", "USERNAME", "Email"} {
+		if err := (&LoginReq{IdentityType: identityType, IdentityValue: "demo_user", Password: "secret123"}).Validate(); err == nil {
+			t.Fatalf("LoginReq.Validate() 应拒绝非规范 identityType=%q", identityType)
+		}
+	}
+	if err := (&LoginReq{IdentityType: LoginIdentityTypeUsername, IdentityValue: "测试用户", Password: "secret123"}).Validate(); err != nil {
+		t.Fatalf("LoginReq.Validate() should count a multibyte username by characters: %v", err)
+	}
+	if err := (&LoginReq{IdentityType: LoginIdentityTypeUsername, IdentityValue: strings.Repeat("用", authUsernameMaxLength+1), Password: "secret123"}).Validate(); err == nil {
+		t.Fatal("LoginReq.Validate() should reject a multibyte username over 32 characters")
 	}
 	if err := (&LoginReq{IdentityType: LoginIdentityTypeUsername, IdentityValue: "demo_user", Password: " "}).Validate(); err == nil {
 		t.Fatal("LoginReq.Validate() should reject blank password")
@@ -75,12 +91,13 @@ func TestAuthReqValidate(t *testing.T) {
 
 // TestGoZeroParseCallsValidate 验证 go-zero 解析请求后会调用 Validate。
 func TestGoZeroParseCallsValidate(t *testing.T) {
+	// 在内存请求上调用框架解析器，不经过路由或认证中间件。
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"identityType":"username","identityValue":"demo_user","password":"   "}`))
 	req.Header.Set("Content-Type", "application/json")
 
 	var parsed LoginReq
-	if err := httpx.Parse(req, &parsed); err == nil {
-		t.Fatal("httpx.Parse() should call LoginReq.Validate()")
+	if err := httpx.Parse(req, &parsed); err == nil || !strings.Contains(err.Error(), "密码不能为空") {
+		t.Fatalf("httpx.Parse() error = %v, want password validation error", err)
 	}
 }
 

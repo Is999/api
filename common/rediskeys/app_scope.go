@@ -13,8 +13,7 @@ func HasPrefix(key string) bool {
 
 // Owner 解析完整 app_id 命名空间中的 app_id。
 func Owner(key string) (string, bool) {
-	key = strings.TrimSpace(key)
-	if !strings.HasPrefix(key, ScopeRoot) {
+	if key == "" || key != strings.TrimSpace(key) || !strings.HasPrefix(key, ScopeRoot) {
 		return "", false
 	}
 	rest := strings.TrimPrefix(key, ScopeRoot)
@@ -22,7 +21,11 @@ func Owner(key string) (string, bool) {
 	if index <= 0 || index >= len(rest)-1 {
 		return "", false
 	}
-	return rest[:index], true
+	owner := rest[:index]
+	if !validScopeOwner(owner) {
+		return "", false
+	}
+	return owner, true
 }
 
 // IsForeignKey 判断完整 Redis key 是否属于其它 app_id。
@@ -41,18 +44,14 @@ func Prefix() string {
 	return ScopeRoot + appID + ":"
 }
 
-// WithPrefix 给内部业务 key 追加当前应用 app_id 命名空间。
-// 外部传入的完整 Redis key 必须属于当前 app_id，避免跨站点 key 串用。
+// WithPrefix 给逻辑 key 添加当前应用前缀；空白和已带 app: 前缀的输入均拒绝。
 func WithPrefix(key string) string {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return key
+	if key == "" || key != strings.TrimSpace(key) {
+		return ""
 	}
-	if ownerAppID, ok := Owner(key); ok {
-		if ownerAppID != runtimecfg.AppID() {
-			return ""
-		}
-		return key
+	// 调用方只能传逻辑 key；完整 key 再次进入该入口说明分层职责混用。
+	if strings.HasPrefix(key, ScopeRoot) {
+		return ""
 	}
 	prefix := Prefix()
 	if prefix == "" {
@@ -61,9 +60,28 @@ func WithPrefix(key string) string {
 	return prefix + key
 }
 
-// TrimPrefix 去掉任意 app_id 的 Redis 命名空间前缀。
+// validScopeOwner 约束 Redis key 中的 app_id，避免畸形前缀被当成另一套逻辑 key。
+func validScopeOwner(owner string) bool {
+	if owner == "" || len(owner) > 64 {
+		return false
+	}
+	for _, current := range owner {
+		if (current >= 'a' && current <= 'z') ||
+			(current >= 'A' && current <= 'Z') ||
+			(current >= '0' && current <= '9') ||
+			current == '-' || current == '_' || current == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// TrimPrefix 去掉任意合法 app_id 前缀；不执行归属鉴权，跨站点隔离须先检查 Owner。
 func TrimPrefix(key string) string {
-	key = strings.TrimSpace(key)
+	if key != strings.TrimSpace(key) {
+		return key
+	}
 	appID, ok := Owner(key)
 	if !ok {
 		return key

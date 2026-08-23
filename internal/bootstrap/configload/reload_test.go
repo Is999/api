@@ -33,6 +33,7 @@ func TestDetectReloadRestartImpact(t *testing.T) {
 
 // TestHotReloadRestartSpecsValid 确保热加载重启边界规格完整且顺序稳定。
 func TestHotReloadRestartSpecsValid(t *testing.T) {
+	// 期望顺序同时约束接口展示和日志中的重启原因。
 	specs := hotReloadRestartSpecs()
 	wantReasons := []string{
 		"HTTP服务配置变更",
@@ -53,6 +54,7 @@ func TestHotReloadRestartSpecsValid(t *testing.T) {
 	if len(specs) != len(wantReasons) {
 		t.Fatalf("热加载重启边界数量不符合预期: got=%d want=%d", len(specs), len(wantReasons))
 	}
+	// 每项必须同时提供变化判断和旧值保留逻辑，原因不得重复。
 	seen := make(map[string]struct{}, len(specs))
 	for index, spec := range specs {
 		if spec.Reason != wantReasons[index] {
@@ -73,6 +75,7 @@ func TestHotReloadRestartSpecsValid(t *testing.T) {
 
 // TestBuildReloadEffectiveConfigPreservesRestartOnlyFields 确保待重启字段保留原值，运行期字段仍可刷新。
 func TestBuildReloadEffectiveConfigPreservesRestartOnlyFields(t *testing.T) {
+	// 旧快照覆盖所有启动期边界，并保留一个可在线更新的认证参数。
 	oldCfg := config.Config{
 		AppID:      "old-app",
 		AppKey:     "old-app-key",
@@ -87,7 +90,11 @@ func TestBuildReloadEffectiveConfigPreservesRestartOnlyFields(t *testing.T) {
 			ProfileCacheTTLSeconds: 300,
 		},
 		Security: config.SecurityConfig{
-			SecretKey: config.SecuritySecretKeyConfig{KeyVersion: "old-v1", SignStatus: 1},
+			SecretKey: config.SecuritySecretKeyConfig{
+				StableVersion: "old-v1",
+				SignStatus:    1,
+				Versions:      []config.SecuritySecretKeyVersionConfig{{KeyVersion: "old-v1"}},
+			},
 		},
 		Collector: config.CollectorConfig{
 			Enabled: true,
@@ -120,6 +127,7 @@ func TestBuildReloadEffectiveConfigPreservesRestartOnlyFields(t *testing.T) {
 	oldCfg.Port = 8890
 	oldCfg.Mode = "dev"
 
+	// 新快照同时修改启动期字段和运行期字段，验证二者分流。
 	newCfg := oldCfg
 	newCfg.AppID = "new-app"
 	newCfg.AppKey = "new-app-key"
@@ -129,24 +137,26 @@ func TestBuildReloadEffectiveConfigPreservesRestartOnlyFields(t *testing.T) {
 	newCfg.JwtExpiresIn = 7200
 	newCfg.Auth.Issuer = "new-issuer"
 	newCfg.Auth.ProfileCacheTTLSeconds = 600
-	newCfg.Security.SecretKey.KeyVersion = "new-v2"
+	newCfg.Security.SecretKey.StableVersion = "new-v2"
+	newCfg.Security.SecretKey.Versions = []config.SecuritySecretKeyVersionConfig{{KeyVersion: "new-v2"}}
 	newCfg.Collector.Kafka.Brokers = []string{"new-kafka:9092"}
 	newCfg.Host = "0.0.0.0"
 	newCfg.Port = 8891
-	newCfg.Mode = "prod"
+	newCfg.Mode = "pro"
 	newCfg.Snowflake.WorkerID = int64Ptr(2)
 	newCfg.User.RouteShardCount = 2
 	newCfg.MySQL = config.MySQLConfig{WriteDataSource: "new-write", MaxOpenConns: 20}
 	newCfg.SiteMySQL = config.SiteMySQLConfig{"site": {WriteDataSource: "new-site"}}
 	newCfg.Redis = config.RedisConfig{Addrs: []string{"127.0.0.1:6380"}}
 	newCfg.Observability.ServiceName = "new-service"
-	newCfg.Observability.Environment = "prod"
+	newCfg.Observability.Environment = "pro"
 	newCfg.Observability.OTLPEndpoint = "new-collector:4317"
 	newCfg.Observability.OTLPProtocol = "http"
 	oldCfg.Alert.Lark.Enabled = false
 	newCfg.Alert.Lark.Enabled = true
 	newCfg.Alert.Lark.WebhookURL = "https://open.larksuite.com/open-apis/bot/v2/hook/test"
 
+	// 生效快照必须保留所有启动期旧值，仅刷新明确支持热加载的字段。
 	effective := BuildReloadEffectiveConfig(oldCfg, newCfg)
 	if effective.Host != oldCfg.Host || effective.Port != oldCfg.Port || effective.Mode != oldCfg.Mode {
 		t.Fatalf("期望 HTTP 服务配置保持原值，实际 host=%s port=%d mode=%s", effective.Host, effective.Port, effective.Mode)
@@ -193,6 +203,7 @@ func TestBuildReloadEffectiveConfigPreservesRestartOnlyFields(t *testing.T) {
 	if !reflect.DeepEqual(effective.Collector, oldCfg.Collector) {
 		t.Fatalf("期望 Collector 配置保持原值，实际为 %+v", effective.Collector)
 	}
+	// 每个被保留的变化都必须出现在重启原因中。
 	restartRequired, reason := DetectReloadRestartImpact(oldCfg, newCfg)
 	if !restartRequired {
 		t.Fatal("期望启动期配置变化提示重启")

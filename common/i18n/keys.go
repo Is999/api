@@ -83,14 +83,12 @@ const (
 	MsgKeySecurityAppIDInvalid = codes.MsgKeySecurityAppIDInvalid
 	// MsgKeySecurityKeyUnavailable 表示安全链路秘钥不可用的文案 key。
 	MsgKeySecurityKeyUnavailable = codes.MsgKeySecurityKeyUnavailable
-	// MsgKeySecuritySignatureFailed 表示请求签名校验失败的文案 key。
-	MsgKeySecuritySignatureFailed = codes.MsgKeySecuritySignatureFailed
+	// MsgKeySecurityRequestRejected 表示请求未通过统一安全校验的文案 key。
+	MsgKeySecurityRequestRejected = codes.MsgKeySecurityRequestRejected
 	// MsgKeySecurityPayloadTooLarge 表示安全字段超过限制的文案 key。
 	MsgKeySecurityPayloadTooLarge = codes.MsgKeySecurityPayloadTooLarge
 	// MsgKeySecurityCryptoDisabled 表示加解密链路未启用的文案 key。
 	MsgKeySecurityCryptoDisabled = codes.MsgKeySecurityCryptoDisabled
-	// MsgKeySecurityRequestDecryptFailed 表示请求解密失败的文案 key。
-	MsgKeySecurityRequestDecryptFailed = codes.MsgKeySecurityRequestDecryptFailed
 	// MsgKeySecurityResponseSignFailed 表示响应签名处理失败的文案 key。
 	MsgKeySecurityResponseSignFailed = codes.MsgKeySecurityResponseSignFailed
 	// MsgKeySecurityResponseEncryptFailed 表示响应加密处理失败的文案 key。
@@ -98,7 +96,7 @@ const (
 
 	// MsgKeyUserNotFound 表示用户不存在的文案 key。
 	MsgKeyUserNotFound = codes.MsgKeyUserNotFound
-	// MsgKeyUserAlreadyExists 表示用户已存在的文案 key。
+	// MsgKeyUserAlreadyExists 对账号标识冲突统一提示，不披露已存在的联系方式。
 	MsgKeyUserAlreadyExists = codes.MsgKeyUserAlreadyExists
 	// MsgKeyUserDisabled 表示账号被禁用的文案 key。
 	MsgKeyUserDisabled = codes.MsgKeyUserDisabled

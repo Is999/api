@@ -24,7 +24,7 @@ const tokenTestIssuer = "api"
 func useTestAppID(t *testing.T, appID string) {
 	t.Helper()
 	prev := runtimecfg.Get()
-	runtimecfg.Set(config.Config{AppID: appID})
+	runtimecfg.Set(runtimecfg.Snapshot{AppID: appID})
 	t.Cleanup(func() {
 		runtimecfg.Restore(prev)
 	})
@@ -66,6 +66,17 @@ func TestVerifyUserTokenRejectsAppIDMismatch(t *testing.T) {
 	}
 }
 
+// TestVerifyUserTokenRejectsWhitespaceAppID 确保 token 的 app_id 与当前命名空间逐字节一致。
+func TestVerifyUserTokenRejectsWhitespaceAppID(t *testing.T) {
+	useTestAppID(t, "site-a")
+	token := signedUserToken(t, "test-secret-please-change", " site-a ")
+	svcCtx := svc.NewServiceContext(tokenTestConfig("site-a"), "v1", svc.Dependencies{})
+
+	if _, err := VerifyUserToken(context.Background(), svcCtx, token, false); !errors.Is(err, errInvalidToken) {
+		t.Fatalf("VerifyUserToken() error = %v, want errInvalidToken", err)
+	}
+}
+
 // TestVerifyUserTokenRejectsRuntimeAppIDMismatch 确保会话 key 只使用当前进程运行态命名空间。
 func TestVerifyUserTokenRejectsRuntimeAppIDMismatch(t *testing.T) {
 	useTestAppID(t, "site-b")
@@ -77,8 +88,8 @@ func TestVerifyUserTokenRejectsRuntimeAppIDMismatch(t *testing.T) {
 	}
 }
 
-// TestVerifyUserTokenDoesNotWriteSessionIndex 确保请求期鉴权只读 session，不重复写入用户索引。
-func TestVerifyUserTokenDoesNotWriteSessionIndex(t *testing.T) {
+// TestVerifyUserTokenPreservesSessionIdentityAndIndex 验证有效鉴权返回 sid/jti，并保留现有会话索引。
+func TestVerifyUserTokenPreservesSessionIdentityAndIndex(t *testing.T) {
 	useTestAppID(t, "site-a")
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
@@ -133,6 +144,17 @@ func TestVerifyUserTokenRejectsNumericSnowflakeSubject(t *testing.T) {
 	useTestAppID(t, "site-a")
 	const userID int64 = 9_007_199_254_740_993
 	token := signedUserTokenForSubject(t, "test-secret-please-change", "site-a", userID)
+	svcCtx := svc.NewServiceContext(tokenTestConfig("site-a"), "v1", svc.Dependencies{})
+
+	if _, err := VerifyUserToken(context.Background(), svcCtx, token, false); !errors.Is(err, errInvalidToken) {
+		t.Fatalf("VerifyUserToken() error = %v, want errInvalidToken", err)
+	}
+}
+
+// TestVerifyUserTokenRejectsWhitespaceSubject 确保用户 ID 声明只接受签发器生成的规范十进制字符串。
+func TestVerifyUserTokenRejectsWhitespaceSubject(t *testing.T) {
+	useTestAppID(t, "site-a")
+	token := signedUserTokenForSubject(t, "test-secret-please-change", "site-a", " 42 ")
 	svcCtx := svc.NewServiceContext(tokenTestConfig("site-a"), "v1", svc.Dependencies{})
 
 	if _, err := VerifyUserToken(context.Background(), svcCtx, token, false); !errors.Is(err, errInvalidToken) {
@@ -215,7 +237,7 @@ func TestVerifyUserTokenRejectsEmptyAppIDClaim(t *testing.T) {
 	}
 }
 
-// TestVerifyUserTokenRejectsMissingSessionID 确保不兼容缺少 sid 的旧登录态。
+// TestVerifyUserTokenRejectsMissingSessionID 确保 token 必须携带 sid。
 func TestVerifyUserTokenRejectsMissingSessionID(t *testing.T) {
 	useTestAppID(t, "site-a")
 	claims := jwt.MapClaims{
@@ -241,7 +263,7 @@ func TestVerifyUserTokenRejectsMissingSessionID(t *testing.T) {
 func TestVerifyUserTokenRejectsUnexpectedIssuer(t *testing.T) {
 	useTestAppID(t, "site-a")
 	svcCtx := svc.NewServiceContext(tokenTestConfig("site-a"), "v1", svc.Dependencies{})
-	for _, issuer := range []string{"", "other-api"} {
+	for _, issuer := range []string{"", "other-api", " api "} {
 		token := signedUserTokenWith(t, jwt.SigningMethodHS256, "test-secret-please-change", "site-a", issuer)
 		if _, err := VerifyUserToken(context.Background(), svcCtx, token, false); !errors.Is(err, errInvalidToken) {
 			t.Fatalf("VerifyUserToken(issuer=%q) error = %v, want errInvalidToken", issuer, err)
@@ -268,7 +290,7 @@ func tokenTestConfig(appID string) config.Config {
 	}
 }
 
-// signedUserToken 表示测试辅助逻辑。
+// signedUserToken 使用默认用户 ID 签发当前 HS256 契约的测试 token。
 func signedUserToken(t *testing.T, secret string, appID string) string {
 	return signedUserTokenForSubject(t, secret, appID, "42")
 }

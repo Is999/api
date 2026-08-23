@@ -71,14 +71,12 @@ const (
 	MsgKeySecurityAppIDInvalid = "security.app_id_invalid"
 	// MsgKeySecurityKeyUnavailable 表示安全链路秘钥不可用的文案 key。
 	MsgKeySecurityKeyUnavailable = "security.key_unavailable"
-	// MsgKeySecuritySignatureFailed 表示请求签名校验失败的文案 key。
-	MsgKeySecuritySignatureFailed = "security.signature_failed"
+	// MsgKeySecurityRequestRejected 表示请求未通过统一安全校验的文案 key。
+	MsgKeySecurityRequestRejected = "security.request_rejected"
 	// MsgKeySecurityPayloadTooLarge 表示安全字段超过限制的文案 key。
 	MsgKeySecurityPayloadTooLarge = "security.payload_too_large"
 	// MsgKeySecurityCryptoDisabled 表示加解密链路未启用的文案 key。
 	MsgKeySecurityCryptoDisabled = "security.crypto_disabled"
-	// MsgKeySecurityRequestDecryptFailed 表示请求解密失败的文案 key。
-	MsgKeySecurityRequestDecryptFailed = "security.request_decrypt_failed"
 	// MsgKeySecurityResponseSignFailed 表示响应签名处理失败的文案 key。
 	MsgKeySecurityResponseSignFailed = "security.response_sign_failed"
 	// MsgKeySecurityResponseEncryptFailed 表示响应加密处理失败的文案 key。
@@ -86,7 +84,7 @@ const (
 
 	// MsgKeyUserNotFound 表示用户不存在的文案 key。
 	MsgKeyUserNotFound = "user.not_found"
-	// MsgKeyUserAlreadyExists 表示用户已存在的文案 key。
+	// MsgKeyUserAlreadyExists 对账号标识冲突统一提示，不披露已存在的联系方式。
 	MsgKeyUserAlreadyExists = "user.already_exists"
 	// MsgKeyUserDisabled 表示账号被禁用的文案 key。
 	MsgKeyUserDisabled = "user.disabled"
@@ -160,14 +158,13 @@ var defaultCodeSpecs = []codeSpec{
 	{code: RegisterDisabled, httpStatus: Forbidden, messageKey: MsgKeyRegisterDisabled},                             // 关闭注册返回 HTTP 403。
 	{code: SecurityAppIDInvalid, httpStatus: BadRequest, messageKey: MsgKeySecurityAppIDInvalid},                    // 安全 AppID 无效返回 HTTP 400。
 	{code: SecurityKeyUnavailable, httpStatus: ServerError, messageKey: MsgKeySecurityKeyUnavailable},               // 安全秘钥不可用返回 HTTP 500。
-	{code: SecuritySignatureFailed, httpStatus: Unauthorized, messageKey: MsgKeySecuritySignatureFailed},            // 签名校验失败返回 HTTP 401。
+	{code: SecurityRequestRejected, httpStatus: Unauthorized, messageKey: MsgKeySecurityRequestRejected},            // 请求安全校验失败返回 HTTP 401，不暴露具体阶段。
 	{code: SecurityPayloadTooLarge, httpStatus: statusPayloadTooLarge, messageKey: MsgKeySecurityPayloadTooLarge},   // 安全字段超限返回 HTTP 413。
 	{code: SecurityCryptoDisabled, httpStatus: Forbidden, messageKey: MsgKeySecurityCryptoDisabled},                 // 加解密链路未启用返回 HTTP 403。
-	{code: SecurityRequestDecryptFailed, httpStatus: Unauthorized, messageKey: MsgKeySecurityRequestDecryptFailed},  // 请求解密失败返回 HTTP 401。
 	{code: SecurityResponseSignFailed, httpStatus: ServerError, messageKey: MsgKeySecurityResponseSignFailed},       // 响应回签失败返回 HTTP 500。
 	{code: SecurityResponseEncryptFailed, httpStatus: ServerError, messageKey: MsgKeySecurityResponseEncryptFailed}, // 响应加密失败返回 HTTP 500。
 	{code: UserNotFound, httpStatus: NotFound, messageKey: MsgKeyUserNotFound},                                      // 用户不存在返回 HTTP 404。
-	{code: UserAlreadyExists, httpStatus: BadRequest, messageKey: MsgKeyUserAlreadyExists},                          // 用户名已存在返回 HTTP 400。
+	{code: UserAlreadyExists, httpStatus: BadRequest, messageKey: MsgKeyUserAlreadyExists},                          // 账号标识已被占用返回 HTTP 400。
 	{code: UserDisabled, httpStatus: Unauthorized, messageKey: MsgKeyUserDisabled},                                  // 账号禁用返回 HTTP 401。
 
 	{code: DependencyUnavailable, httpStatus: ServiceBusy, messageKey: MsgKeyDependencyUnavailable}, // 核心依赖不可用返回 HTTP 503。
@@ -210,14 +207,12 @@ func IsSuccess(code int) bool {
 	return ok
 }
 
-// HTTPStatus 根据业务码返回建议 HTTP 状态码，未知成功码返回 200，未知失败码返回 500。
+// HTTPStatus 返回内置业务码的 HTTP 映射；未声明的业务码按 500 处理。
 func HTTPStatus(code int) int {
 	if status, ok := codeHTTPStatusMap[code]; ok {
 		return status
 	}
-	if IsSuccess(code) {
-		return OK
-	}
+	// 成功码已包含在契约表，未登记业务码统一按内部错误处理。
 	return ServerError
 }
 

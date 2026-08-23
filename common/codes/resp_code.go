@@ -62,22 +62,20 @@ const (
 	SecurityAppIDInvalid = CodeAuthBase + 6
 	// SecurityKeyUnavailable 表示安全链路秘钥不可用。
 	SecurityKeyUnavailable = CodeAuthBase + 7
-	// SecuritySignatureFailed 表示请求签名校验失败。
-	SecuritySignatureFailed = CodeAuthBase + 8
+	// SecurityRequestRejected 表示请求未通过统一安全校验，不向外部暴露验签或解密阶段。
+	SecurityRequestRejected = CodeAuthBase + 8
 	// SecurityPayloadTooLarge 表示签名或加密字段超过安全链路上限。
 	SecurityPayloadTooLarge = CodeAuthBase + 9
 	// SecurityCryptoDisabled 表示加解密链路未启用。
 	SecurityCryptoDisabled = CodeAuthBase + 10
-	// SecurityRequestDecryptFailed 表示请求解密失败。
-	SecurityRequestDecryptFailed = CodeAuthBase + 11
 	// SecurityResponseSignFailed 表示响应回签失败。
-	SecurityResponseSignFailed = CodeAuthBase + 12
+	SecurityResponseSignFailed = CodeAuthBase + 11
 	// SecurityResponseEncryptFailed 表示响应加密失败。
-	SecurityResponseEncryptFailed = CodeAuthBase + 13
+	SecurityResponseEncryptFailed = CodeAuthBase + 12
 
 	// UserNotFound 表示用户不存在。
 	UserNotFound = CodeUserBase + 1
-	// UserAlreadyExists 表示用户名已存在。
+	// UserAlreadyExists 表示用户名、邮箱或手机等账号标识已被占用。
 	UserAlreadyExists = CodeUserBase + 2
 	// UserDisabled 表示账号被禁用。
 	UserDisabled = CodeUserBase + 3

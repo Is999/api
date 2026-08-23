@@ -6,7 +6,7 @@ import (
 
 	codes "api/common/codes"
 	i18n "api/common/i18n"
-	"api/helper"
+	"api/internal/httpresp"
 	"api/internal/infra/loggerx"
 
 	"github.com/Is999/go-utils/errors"
@@ -29,7 +29,8 @@ func (m *RecoverMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 				ctx := r.Context()
 				panicErr := errors.Errorf("请求 panic: %v", err)
 				loggerx.Errorw(ctx, "请求 发生异常", panicErr, logx.Field("stacktrace", string(debug.Stack())))
-				helper.NewJSONResp(ctx, w).
+				// 将 panic 原因写入请求元数据，供统一日志与 trace 采集。
+				httpresp.NewJSONResp(ctx, w).
 					SetHTTPStatus(http.StatusInternalServerError).
 					SetCode(codes.InternalError).
 					SetError(panicErr).

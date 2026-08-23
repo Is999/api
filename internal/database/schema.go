@@ -50,6 +50,7 @@ func MigrationAssetNames() ([]string, error) {
 func readMigrationSQL(asset string) string {
 	data, err := databaseMigrationAssets.ReadFile(migrationAssetPath(asset))
 	if err != nil {
+		// 空 SQL 由清单校验统一拒绝，读取资产不在启动路径触发 panic。
 		return ""
 	}
 	return embedasset.StripLeadingLineComments(string(data), "--")

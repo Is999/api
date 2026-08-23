@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	keys "api/common/rediskeys"
@@ -34,34 +35,32 @@ func tableCacheTargets(base *corelogic.BaseLogic) []tablecache.Target {
 // loadSysConfigTableCache 加载单个系统配置 Hash 缓存数据。
 func loadSysConfigTableCache(base *corelogic.BaseLogic) tablecache.Loader {
 	return func(ctx context.Context, params tablecache.LoadParams) ([]tablecache.Entry, error) {
-		uuid, err := tableCacheFirstStringPart(params, "配置UUID")
-		if err != nil {
-			return nil, errors.Tag(err)
+		// UUID 允许冒号和内部空白，须还原完整后缀，不能按缓存分段截断查询条件。
+		uuid := strings.Join(params.KeyParts, ":")
+		if uuid == "" || uuid != strings.TrimSpace(uuid) {
+			return nil, errors.Errorf("配置UUID不能为空或包含首尾空白")
 		}
+		// 回源固定读取写库，避免刚更新的数据被副本延迟覆盖到缓存。
 		writeDB, err := tableCacheWriteDB(base, svc.DatabaseMain, "main")
 		if err != nil {
 			return nil, errors.Tag(err)
 		}
+		// UUID 唯一索引最多返回一行，只读取标识校验和缓存解码所需字段。
 		var cfg model.SysConfig
-		if err := writeDB.WithContext(ctx).Where("uuid = ?", uuid).First(&cfg).Error; err != nil {
+		if err := writeDB.WithContext(ctx).Select("uuid", "type", "value").Where("uuid = ?", uuid).First(&cfg).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, nil
 			}
 			return nil, errors.Tag(err)
 		}
+		// 数据库排序规则可能忽略大小写，别名不能写入无法按原 UUID 失效的缓存。
+		if cfg.UUID != uuid {
+			return nil, errors.Wrapf(gorm.ErrRecordNotFound, "配置UUID不匹配: %s", uuid)
+		}
+		// 业务读取只解码类型和值；标题、层级等管理信息仍从数据库获取。
 		cache := map[string]any{
-			"id":        cfg.ID,
-			"uuid":      cfg.UUID,
-			"title":     cfg.Title,
-			"type":      cfg.Type,
-			"value":     cfg.Value,
-			"example":   cfg.Example,
-			"remark":    cfg.Remark,
-			"page":      cfg.Page,
-			"pid":       cfg.Pid,
-			"pids":      cfg.Pids,
-			"version":   cfg.Version,
-			"updatedAt": corelogic.FormatDateTime(cfg.UpdatedAt),
+			"type":  cfg.Type,
+			"value": cfg.Value,
 		}
 		return []tablecache.Entry{{
 			Key:   params.Key,

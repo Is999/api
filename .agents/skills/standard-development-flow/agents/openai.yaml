@@ -1,4 +1,4 @@
 interface:
   display_name: "标准开发流程"
-  short_description: "统一执行需求意图、源码证据、计划、实现、同步、候选验证与最终交接。"
-  default_prompt: "使用 $standard-development-flow 从意图确认到交付收口执行这个非平凡任务。"
+  short_description: "以专业实现、初级开发者易维护为首要门槛，执行意图、验证与交付复核。"
+  default_prompt: "使用 $standard-development-flow 在已确认范围执行；正确性、安全、数据完整性和资源边界不可退让，以简洁、清晰、易阅读易维护为最高实现优先级，按专业资深的高级开发者标准落实轻量事务、就近短注释和初级开发者可读的需求及回归入口。"

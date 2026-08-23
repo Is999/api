@@ -37,6 +37,7 @@ func ProtectUserContacts(user *User, secret string) error {
 	if err != nil {
 		return errors.Tag(err)
 	}
+	// 两种联系方式均派生成功后再回填，失败时不会留下半份安全字段。
 	user.Email = normalizeUserContact(UserIdentityTypeEmail, user.Email)
 	user.Phone = normalizeUserContact(UserIdentityTypePhone, user.Phone)
 	user.EmailCiphertext = emailFields.ciphertext
@@ -55,9 +56,10 @@ func ProtectUserProfileUpdates(updates map[string]any, secret string) (map[strin
 	if len(updates) == 0 {
 		return updates, nil
 	}
+	// 在独立映射中派生密文和索引，失败不改写调用方持有的更新参数。
 	next := make(map[string]any, len(updates)+6)
 	for key, value := range updates {
-		switch strings.ToLower(strings.TrimSpace(key)) {
+		switch key {
 		case "email":
 			fields, err := buildUserContactFields(UserIdentityTypeEmail, fmt.Sprint(value), secret)
 			if err != nil {
@@ -85,7 +87,6 @@ func ProtectUserProfileUpdates(updates map[string]any, secret string) (map[strin
 
 // UserContactIdentityHash 返回邮箱或手机号精确查询使用的 HMAC 哈希。
 func UserContactIdentityHash(identityType string, identityValue string, secret string) (string, error) {
-	identityType = strings.ToLower(strings.TrimSpace(identityType))
 	switch identityType {
 	case UserIdentityTypeEmail, UserIdentityTypePhone:
 	default:
@@ -131,7 +132,7 @@ func buildUserContactFields(identityType string, identityValue string, secret st
 // normalizeUserContact 归一化联系方式，保证加密、哈希和登录查找输入一致。
 func normalizeUserContact(identityType string, value string) string {
 	value = strings.TrimSpace(value)
-	switch strings.ToLower(strings.TrimSpace(identityType)) {
+	switch identityType {
 	case UserIdentityTypeEmail:
 		return strings.ToLower(value)
 	case UserIdentityTypePhone:
@@ -159,6 +160,7 @@ func encryptUserContact(value string, secret string) (string, error) {
 	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", errors.Wrap(err, "生成用户联系方式nonce失败")
 	}
+	// 存储格式为 nonce + 密文 + GCM 标签；密钥版本作为附加认证数据绑定。
 	payload := aead.Seal(nonce, nonce, []byte(value), []byte(userContactKeyVersion))
 	return base64.RawStdEncoding.EncodeToString(payload), nil
 }
@@ -170,7 +172,8 @@ func hmacUserContact(identityType string, value string, secret string) (string, 
 		return "", errors.Tag(err)
 	}
 	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(strings.ToLower(strings.TrimSpace(identityType))))
+	// 类型和零字节分隔符隔离邮箱、手机号查询域，密文的随机 nonce 不参与索引。
+	_, _ = mac.Write([]byte(identityType))
 	_, _ = mac.Write([]byte{0})
 	_, _ = mac.Write([]byte(value))
 	return hex.EncodeToString(mac.Sum(nil)), nil
@@ -178,17 +181,16 @@ func hmacUserContact(identityType string, value string, secret string) (string, 
 
 // deriveUserContactKey 从 app_key 派生固定用途的 32 字节密钥。
 func deriveUserContactKey(secret string, purpose string) ([]byte, error) {
-	secret = strings.TrimSpace(secret)
-	if secret == "" {
+	if secret == "" || secret != strings.TrimSpace(secret) {
 		return nil, errors.New("user 联系方式加密需要配置 app_key")
 	}
-	sum := sha256.Sum256([]byte(strings.TrimSpace(purpose) + "\x00" + secret))
+	sum := sha256.Sum256([]byte(purpose + "\x00" + secret))
 	return sum[:], nil
 }
 
 // maskUserContact 返回联系方式默认展示值。
 func maskUserContact(identityType string, value string) string {
-	switch strings.ToLower(strings.TrimSpace(identityType)) {
+	switch identityType {
 	case UserIdentityTypeEmail:
 		return maskUserEmail(value)
 	case UserIdentityTypePhone:
@@ -221,6 +223,7 @@ func maskMiddle(value string, left int, right int) string {
 	}
 	total := utf8.RuneCountInString(value)
 	if total <= left+right {
+		// 短值不能被“保留前后缀”规则完整暴露，最多留下首字符。
 		if total <= 1 {
 			return "*"
 		}
@@ -228,10 +231,7 @@ func maskMiddle(value string, left int, right int) string {
 		right = 0
 	}
 	runes := []rune(value)
-	maskedCount := total - left - right
-	if maskedCount < 3 {
-		maskedCount = 3
-	}
+	maskedCount := max(total-left-right, 3)
 	if right <= 0 {
 		return string(runes[:left]) + strings.Repeat("*", maskedCount)
 	}

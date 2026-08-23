@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Is999/go-utils/errors"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // 业务用户表名、身份类型和状态枚举。
@@ -90,6 +92,14 @@ type UserIdentity struct {
 	UpdatedAt     time.Time `gorm:"column:updated_at;type:datetime;not null;default:CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;comment:更新时间" json:"updatedAt"`                   // 更新时间
 }
 
+// userByIDRow 承载按 ID 联查身份目录和用户主表的单行结果。
+type userByIDRow struct {
+	User                   // User 接收目标物理表存在时的完整用户字段
+	IdentityValue   string `gorm:"column:identity_value"`    // 账号身份值用于复用现有规范值校验
+	IdentityShardNo int    `gorm:"column:identity_shard_no"` // 身份固定桶必须与用户 ID 计算结果一致
+	MainID          *int64 `gorm:"column:main_id"`           // nil 表示身份存在但目标物理表记录缺失
+}
+
 // TableName 返回业务用户表名。
 func (*User) TableName() string {
 	return TableNameUser
@@ -102,7 +112,7 @@ func (*UserIdentity) TableName() string {
 
 // UserIdentityTableName 返回身份类型对应的物理登录身份索引表名。
 func UserIdentityTableName(identityType string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(identityType)) {
+	switch identityType {
 	case UserIdentityTypeUsername:
 		return TableNameUserIdentityUsername, nil
 	case UserIdentityTypeEmail:
@@ -140,7 +150,7 @@ func (i *UserIdentity) IdentityTableName() (string, error) {
 
 // NormalizeUserIdentity 归一化用户登录身份，保证唯一索引输入稳定。
 func NormalizeUserIdentity(identityType string, provider string, identityValue string) (string, string, string, error) {
-	normalizedType, normalizedProvider, err := normalizeUserIdentityTypeProvider(identityType, provider)
+	normalizedType, normalizedProvider, err := validateUserIdentityTypeProvider(identityType, provider)
 	if err != nil {
 		return "", "", "", errors.Tag(err)
 	}
@@ -159,7 +169,7 @@ func NormalizeUserIdentity(identityType string, provider string, identityValue s
 func UserIdentitySubject(identityType string, provider string, identityValue string) string {
 	normalizedType, normalizedProvider, normalizedValue, err := NormalizeUserIdentity(identityType, provider, identityValue)
 	if err != nil {
-		return strings.ToLower(strings.TrimSpace(identityType)) + ":" + strings.TrimSpace(identityValue)
+		return identityType + ":" + strings.TrimSpace(identityValue)
 	}
 	if normalizedProvider != "" {
 		return normalizedType + ":" + normalizedProvider + ":" + normalizedValue
@@ -176,43 +186,88 @@ func FindUserByIdentity(db *gorm.DB, identityType string, provider string, ident
 	return FindUserByIdentityRow(db, identity, routeShardCount)
 }
 
-// FindUserByID 根据 ID 和当前路由配置查询业务用户；未命中时返回 nil。
+// FindUserByID 根据 ID 联查账号身份和目标物理表，并区分身份、主表缺失状态。
 func FindUserByID(db *gorm.DB, id int64, routeShardCount int) (*User, error) {
 	if id <= 0 {
 		return nil, nil
 	}
-	identity, err := FindUserIdentityByUserIDAndType(db, id, UserIdentityTypeUsername, UserIdentityProviderLocal)
+	shardNo := idgen.ShardNo(id)
+	tableName, err := UserPhysicalTableName(shardNo, routeShardCount)
 	if err != nil {
 		return nil, errors.Tag(err)
 	}
-	if identity == nil {
+	var row userByIDRow
+	// 物理表只由请求 ID 的固定桶计算，目录中的分片值仅用于完整性校验，不能参与动态表名。
+	query := userDBSession(db).
+		Table(TableNameUserIdentityUsername+" AS ui").
+		Select([]string{
+			"ui.identity_value",
+			"ui.user_shard_no AS identity_shard_no",
+			"u.id AS main_id",
+			"u.shard_no",
+			"u.username",
+			"u.nickname",
+			"u.password_hash",
+			"u.email_ciphertext",
+			"u.email_hash",
+			"u.email_masked",
+			"u.email_key_version",
+			"u.phone_ciphertext",
+			"u.phone_hash",
+			"u.phone_masked",
+			"u.phone_key_version",
+			"u.avatar",
+			"u.status",
+			"u.auth_version",
+			"u.last_login_at",
+			"u.last_login_ip",
+			"u.created_at",
+			"u.updated_at",
+		}).
+		Joins("LEFT JOIN ? AS u ON u.id = ui.user_id AND u.shard_no = ?", clause.Table{Name: tableName}, shardNo).
+		Where("ui.user_id = ?", id).
+		Take(&row)
+	if errors.Is(query.Error, gorm.ErrRecordNotFound) {
 		return nil, errors.Wrapf(ErrUserIdentityMissing, "user_id=%d type=%s", id, UserIdentityTypeUsername)
 	}
-	return FindUserByIdentityRow(db, identity, routeShardCount)
+	if query.Error != nil {
+		return nil, errors.Wrapf(query.Error, "User.FindByID 联查用户身份和主表失败 user_id=%d table=%s", id, tableName)
+	}
+	// 先校验身份目录再判断主表命中，避免损坏目录被误报为普通用户缺失。
+	identity := &UserIdentity{
+		IdentityType:  UserIdentityTypeUsername,
+		IdentityValue: row.IdentityValue,
+		UserID:        id,
+		UserShardNo:   row.IdentityShardNo,
+	}
+	if err := validateUserIdentityRoute(identity); err != nil {
+		return nil, errors.Tag(err)
+	}
+	if row.MainID == nil {
+		return nil, errors.Errorf("用户身份索引存在但主表记录缺失 user_id=%d table=%s", id, tableName)
+	}
+	row.User.ID = *row.MainID
+	return &row.User, nil
 }
 
-// CreateUserWithIdentities 创建业务用户并同步写入基础登录身份索引。
+// CreateUserWithIdentities 在同一事务写入业务用户及其基础登录身份索引。
 func CreateUserWithIdentities(db *gorm.DB, user *User, routeShardCount int, privacySecret string, omitColumns ...string) error {
-	return db.Transaction(func(tx *gorm.DB) error {
-		return errors.Tag(CreateUserWithIdentitiesTx(tx, user, routeShardCount, privacySecret, omitColumns...))
-	})
-}
-
-// CreateUserWithIdentitiesTx 在调用方事务内创建业务用户及基础登录身份索引。
-func CreateUserWithIdentitiesTx(tx *gorm.DB, user *User, routeShardCount int, privacySecret string, omitColumns ...string) error {
 	if user == nil {
 		return errors.New("User.Create 用户为空")
 	}
-	if tx == nil {
-		return errors.New("User.Create 数据库事务为空")
+	if db == nil {
+		return errors.New("User.Create 数据库为空")
 	}
+	// 账号规范值在事务前固定，避免无效输入占用数据库连接。
 	normalizeUserProfile(user)
 	if user.Username == "" {
 		return errors.New("User.Create 用户名为空")
 	}
+	// 联系方式密文和查询哈希在事务前生成，随机数读取不会拉长事务。
 	if err := ProtectUserContacts(user, privacySecret); err != nil {
 		return errors.Tag(err)
 	}
+	// 物理表和身份索引在事务前确定，事务内只执行已准备的写入。
 	if err := validateUserShardNo(user); err != nil {
 		return errors.Tag(err)
 	}
@@ -224,16 +279,24 @@ func CreateUserWithIdentitiesTx(tx *gorm.DB, user *User, routeShardCount int, pr
 	if err != nil {
 		return errors.Tag(err)
 	}
-	for index := range identities {
-		if err := createUserIdentity(tx, &identities[index]); err != nil {
-			return errors.Tag(err)
+	// 写入视图覆盖 GORM 的默认值标签，显式禁用（0）不能被改成启用（1）。
+	row := struct {
+		*User      // 复用实体字段及时间戳回填，不复制整份用户数据。
+		Status int `gorm:"column:status"` // 保留调用方确定的状态，包括零值。
+	}{User: user, Status: user.Status}
+	// 主表与登录身份索引必须同时成功，任一写入失败即整体回滚。
+	return db.Transaction(func(tx *gorm.DB) error {
+		for index := range identities {
+			if err := createUserIdentity(tx, &identities[index]); err != nil {
+				return errors.Tag(err)
+			}
 		}
-	}
-	query := tx.Table(tableName)
-	if len(omitColumns) > 0 {
-		query = query.Omit(omitColumns...)
-	}
-	return errors.Tag(query.Create(user).Error)
+		query := tx.Table(tableName)
+		if len(omitColumns) > 0 {
+			query = query.Omit(omitColumns...)
+		}
+		return errors.Tag(query.Create(&row).Error)
+	})
 }
 
 // UpdateUser 按当前路由配置和主键更新业务用户可变字段。
@@ -245,11 +308,31 @@ func UpdateUser(db *gorm.DB, id int64, updates map[string]any, routeShardCount i
 	if len(updates) == 0 {
 		return nil
 	}
-	tableName, err := userTableNameByID(db, id, routeShardCount)
+	// 用户表由 ID 固定桶直接路由，避免登录链路重复查询身份目录。
+	tableName, err := UserPhysicalTableName(idgen.ShardNo(id), routeShardCount)
 	if err != nil {
 		return errors.Tag(err)
 	}
-	return errors.Tag(userDBSession(db).Model(&User{}).Table(tableName).Where("shard_no = ? AND id = ?", idgen.ShardNo(id), id).Updates(updates).Error)
+	// 单表资料更新由单条 SQL 保证原子性，关闭 GORM 默认事务减少协议往返。
+	result := userDBSession(db).Session(&gorm.Session{SkipDefaultTransaction: true}).
+		Model(&User{}).Table(tableName).
+		Where("shard_no = ? AND id = ?", idgen.ShardNo(id), id).
+		Updates(updates)
+	if result.Error != nil {
+		return errors.Tag(result.Error)
+	}
+	if result.RowsAffected > 0 {
+		return nil
+	}
+	// MySQL 在字段值未变时也可能返回 0；只在该稀有分支回查，区分并发删除和幂等更新。
+	row, err := findUserByIDInTable(db, tableName, id)
+	if err != nil {
+		return errors.Tag(err)
+	}
+	if row == nil {
+		return errors.Errorf("用户更新未命中主表记录 user_id=%d table=%s", id, tableName)
+	}
+	return nil
 }
 
 // UpdateUserProfileWithIdentities 更新用户资料并同步邮箱、手机号登录身份。
@@ -277,29 +360,56 @@ func UpdateUserProfileWithIdentities(db *gorm.DB, id int64, updates map[string]a
 	if err != nil {
 		return errors.Tag(err)
 	}
-	return db.Transaction(func(tx *gorm.DB) error {
-		if err := userDBSession(tx).Model(&User{}).Table(tableName).Where("shard_no = ? AND id = ?", identity.UserShardNo, id).Updates(updates).Error; err != nil {
-			return errors.Tag(err)
+	emailHash, emailChanged := userContactHashUpdate(updates, "email_hash")
+	phoneHash, phoneChanged := userContactHashUpdate(updates, "phone_hash")
+	identityChanged := emailChanged || phoneChanged
+	// updateProfile 复用同一写入路径；只有联系身份变化时，外层才提供跨表事务。
+	updateProfile := func(writeDB *gorm.DB) error {
+		result := userDBSession(writeDB).Session(&gorm.Session{SkipDefaultTransaction: true}).
+			Model(&User{}).Table(tableName).
+			Where("shard_no = ? AND id = ?", identity.UserShardNo, id).
+			Updates(updates)
+		if result.Error != nil {
+			return errors.Tag(result.Error)
 		}
-		if !profileIdentityChanged(updates) {
+		if result.RowsAffected == 0 {
+			// MySQL 可能把同值更新计为零行；只在该分支回查，区分幂等更新和主表缺失。
+			row, err := findUserByIDInTable(writeDB, tableName, id)
+			if err != nil {
+				return errors.Tag(err)
+			}
+			if row == nil {
+				return errors.Errorf("用户资料更新未命中主表记录 user_id=%d table=%s", id, tableName)
+			}
+		}
+		if !identityChanged {
 			return nil
 		}
-		row, err := findUserByIDInTable(tx, tableName, id)
-		if err != nil {
-			return errors.Tag(err)
+		user := &User{ID: id, ShardNo: identity.UserShardNo}
+		if emailChanged {
+			if err := syncUserContactIdentity(writeDB, user, UserIdentityTypeEmail, emailHash); err != nil {
+				return errors.Tag(err)
+			}
 		}
-		if row == nil {
-			return errors.Errorf("用户资料已更新但主表记录缺失 user_id=%d table=%s", id, tableName)
+		if phoneChanged {
+			return errors.Tag(syncUserContactIdentity(writeDB, user, UserIdentityTypePhone, phoneHash))
 		}
-		return syncUserContactIdentities(tx, row)
-	})
+		return nil
+	}
+	if !identityChanged {
+		// 单表资料只需一条原子 UPDATE，关闭 GORM 默认事务可省去 BEGIN/COMMIT 往返。
+		return updateProfile(db)
+	}
+	// 联系方式与登录索引共同提交，唯一冲突时不能只留下主表的新值。
+	return db.Transaction(updateProfile)
 }
 
 // FindUserIdentity 根据身份类型、提供方和身份值查询索引；未命中时返回 nil。
 func FindUserIdentity(db *gorm.DB, identityType string, provider string, identityValue string, privacySecret string) (*UserIdentity, error) {
-	if strings.TrimSpace(identityType) == "" || strings.TrimSpace(identityValue) == "" {
+	if identityType == "" || strings.TrimSpace(identityValue) == "" {
 		return nil, nil
 	}
+	// 查询与写入共用身份规范值，避免大小写或首尾空白绕开同一唯一索引。
 	identityType, provider, identityValue, err := NormalizeUserIdentity(identityType, provider, identityValue)
 	if err != nil {
 		return nil, errors.Tag(err)
@@ -319,6 +429,7 @@ func FindUserIdentity(db *gorm.DB, identityType string, provider string, identit
 		}
 		return nil, errors.Wrapf(err, "UserIdentity.Find 查询用户身份 type=%s provider=%s 失败", identityType, provider)
 	}
+	// 身份类型不落库，由所选物理表恢复，供后续用户分片校验使用。
 	row.IdentityType = identityType
 	return &row, nil
 }
@@ -328,7 +439,7 @@ func FindUserIdentityByUserIDAndType(db *gorm.DB, userID int64, identityType str
 	if userID <= 0 {
 		return nil, nil
 	}
-	identityType, provider, err := normalizeUserIdentityTypeProvider(identityType, provider)
+	identityType, provider, err := validateUserIdentityTypeProvider(identityType, provider)
 	if err != nil {
 		return nil, errors.Tag(err)
 	}
@@ -338,6 +449,7 @@ func FindUserIdentityByUserIDAndType(db *gorm.DB, userID int64, identityType str
 	}
 	var row UserIdentity
 	query := userDBSession(db).Table(tableName).Where("user_id = ?", userID)
+	// 仅三方身份表持久化 provider，同一用户的不同提供方不能混查。
 	if identityType == UserIdentityTypeOAuth {
 		query = query.Where("provider = ?", provider)
 	}
@@ -347,6 +459,7 @@ func FindUserIdentityByUserIDAndType(db *gorm.DB, userID int64, identityType str
 		}
 		return nil, errors.Wrapf(err, "UserIdentity.FindByUserID 查询用户身份 user_id=%d type=%s provider=%s 失败", userID, identityType, provider)
 	}
+	// 与按身份值查找保持一致，补回由物理表决定的非持久化类型。
 	row.IdentityType = identityType
 	return &row, nil
 }
@@ -441,18 +554,6 @@ func findUserByIDInTable(db *gorm.DB, tableName string, id int64) (*User, error)
 	return &row, nil
 }
 
-// userTableNameByID 根据身份目录固定桶和当前配置返回用户表。
-func userTableNameByID(db *gorm.DB, id int64, routeShardCount int) (string, error) {
-	identity, err := FindUserIdentityByUserIDAndType(db, id, UserIdentityTypeUsername, UserIdentityProviderLocal)
-	if err != nil {
-		return "", errors.Tag(err)
-	}
-	if identity == nil {
-		return "", errors.Wrapf(ErrUserIdentityMissing, "user_id=%d type=%s", id, UserIdentityTypeUsername)
-	}
-	return identity.UserTableName(routeShardCount)
-}
-
 // normalizeUserProfile 归一化用户资料中的登录身份字段。
 func normalizeUserProfile(user *User) {
 	if user == nil {
@@ -491,18 +592,9 @@ func userProfileIdentities(user *User) ([]UserIdentity, error) {
 	return items, nil
 }
 
-// syncUserContactIdentities 同步用户邮箱和手机号身份索引。
-func syncUserContactIdentities(db *gorm.DB, user *User) error {
-	normalizeUserProfile(user)
-	if err := syncUserContactIdentity(db, user, UserIdentityTypeEmail, user.EmailHash); err != nil {
-		return errors.Tag(err)
-	}
-	return errors.Tag(syncUserContactIdentity(db, user, UserIdentityTypePhone, user.PhoneHash))
-}
-
 // syncUserContactIdentity 按资料字段新增、更新或删除单个联系身份。
 func syncUserContactIdentity(db *gorm.DB, user *User, identityType string, identityHash string) error {
-	identityType, provider, err := normalizeUserIdentityTypeProvider(identityType, UserIdentityProviderLocal)
+	identityType, provider, err := validateUserIdentityTypeProvider(identityType, UserIdentityProviderLocal)
 	if err != nil {
 		return errors.Tag(err)
 	}
@@ -511,6 +603,7 @@ func syncUserContactIdentity(db *gorm.DB, user *User, identityType string, ident
 		return errors.Tag(err)
 	}
 	if strings.TrimSpace(identityHash) == "" {
+		// 空哈希表示用户清空联系方式，身份索引必须与主表字段在同一事务内删除。
 		if exists == nil {
 			return nil
 		}
@@ -524,10 +617,6 @@ func syncUserContactIdentity(db *gorm.DB, user *User, identityType string, ident
 	if err != nil {
 		return errors.Tag(err)
 	}
-	nextTableName, err := next.IdentityTableName()
-	if err != nil {
-		return errors.Tag(err)
-	}
 	if exists == nil {
 		return errors.Tag(createUserIdentity(db, next))
 	}
@@ -535,11 +624,9 @@ func syncUserContactIdentity(db *gorm.DB, user *User, identityType string, ident
 	if err != nil {
 		return errors.Tag(err)
 	}
-	if existsTableName != nextTableName {
-		if err := userDBSession(db).Table(existsTableName).Where("id = ?", exists.ID).Delete(&UserIdentity{}).Error; err != nil {
-			return errors.Tag(err)
-		}
-		return errors.Tag(createUserIdentity(db, next))
+	if exists.IdentityHash == next.IdentityHash && exists.UserShardNo == next.UserShardNo {
+		// 同值资料更新不触碰唯一索引，减少无效写入和锁竞争。
+		return nil
 	}
 	return errors.Tag(updateUserIdentity(db, existsTableName, exists.ID, next))
 }
@@ -552,7 +639,7 @@ func newUserIdentity(user *User, identityType string, provider string, identityV
 	if err := validateUserShardNo(user); err != nil {
 		return nil, errors.Tag(err)
 	}
-	identityType, provider, err := normalizeUserIdentityTypeProvider(identityType, provider)
+	identityType, provider, err := validateUserIdentityTypeProvider(identityType, provider)
 	if err != nil {
 		return nil, errors.Tag(err)
 	}
@@ -564,6 +651,7 @@ func newUserIdentity(user *User, identityType string, provider string, identityV
 	}
 	identityHash = strings.TrimSpace(identityHash)
 	if identityType == UserIdentityTypeEmail || identityType == UserIdentityTypePhone {
+		// 联系身份沿用资料派生出的查询哈希，不将邮箱或手机号明文写入目录。
 		if len(identityHash) != userContactHashHexSize {
 			return nil, errors.Errorf("用户%s身份哈希长度必须为%d", identityType, userContactHashHexSize)
 		}
@@ -579,16 +667,20 @@ func newUserIdentity(user *User, identityType string, provider string, identityV
 	}, nil
 }
 
-// normalizeUserIdentityTypeProvider 归一化身份类型和三方提供方。
-func normalizeUserIdentityTypeProvider(identityType string, provider string) (string, string, error) {
-	identityType = strings.ToLower(strings.TrimSpace(identityType))
-	provider = strings.ToLower(strings.TrimSpace(provider))
+// validateUserIdentityTypeProvider 校验身份类型和三方提供方的规范值。
+func validateUserIdentityTypeProvider(identityType string, provider string) (string, string, error) {
 	switch identityType {
 	case UserIdentityTypeUsername, UserIdentityTypeEmail, UserIdentityTypePhone:
+		if provider != UserIdentityProviderLocal {
+			return "", "", errors.Errorf("本地用户登录身份 provider 必须为空")
+		}
 		return identityType, UserIdentityProviderLocal, nil
 	case UserIdentityTypeOAuth:
 		if provider == "" {
 			return "", "", errors.New("三方登录身份 provider 不能为空")
+		}
+		if provider != strings.TrimSpace(provider) || provider != strings.ToLower(provider) {
+			return "", "", errors.New("三方登录身份 provider 必须使用无首尾空白的小写规范值")
 		}
 		return identityType, provider, nil
 	default:
@@ -596,15 +688,13 @@ func normalizeUserIdentityTypeProvider(identityType string, provider string) (st
 	}
 }
 
-// profileIdentityChanged 判断本次资料更新是否影响登录身份索引。
-func profileIdentityChanged(updates map[string]any) bool {
-	for key := range updates {
-		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "email", "phone", "email_hash", "phone_hash":
-			return true
-		}
+// userContactHashUpdate 读取精确字段名对应的联系方式哈希。
+func userContactHashUpdate(updates map[string]any, field string) (string, bool) {
+	value, ok := updates[field]
+	if !ok {
+		return "", false
 	}
-	return false
+	return fmt.Sprint(value), true
 }
 
 // validateUserIdentityRoute 校验身份索引中的身份类型、用户 ID 与逻辑分片一致。
@@ -612,20 +702,36 @@ func validateUserIdentityRoute(identity *UserIdentity) error {
 	if identity.UserID <= 0 {
 		return errors.New("用户身份索引 user_id 必须大于 0")
 	}
-	identityType, _, err := normalizeUserIdentityTypeProvider(identity.IdentityType, identity.Provider)
+	// 身份类型先与 provider 联合校验，避免同一值落入多种索引语义。
+	identityType, _, err := validateUserIdentityTypeProvider(identity.IdentityType, identity.Provider)
 	if err != nil {
 		return errors.Tag(err)
 	}
 	switch identityType {
 	case UserIdentityTypeEmail, UserIdentityTypePhone:
-		if len(strings.TrimSpace(identity.IdentityHash)) != userContactHashHexSize {
-			return errors.Errorf("用户身份索引 identity_hash 长度必须为 %d", userContactHashHexSize)
+		// 联系方式只保存定长小写哈希，明文索引列必须为空。
+		if identity.IdentityValue != "" {
+			return errors.New("邮箱或手机号身份索引 identity_value 必须为空")
+		}
+		if len(identity.IdentityHash) != userContactHashHexSize ||
+			identity.IdentityHash != strings.TrimSpace(identity.IdentityHash) ||
+			identity.IdentityHash != strings.ToLower(identity.IdentityHash) {
+			return errors.Errorf("用户身份索引 identity_hash 必须为 %d 位小写十六进制", userContactHashHexSize)
+		}
+		if _, err := hex.DecodeString(identity.IdentityHash); err != nil {
+			return errors.Wrap(err, "用户身份索引 identity_hash 不是十六进制")
 		}
 	case UserIdentityTypeUsername, UserIdentityTypeOAuth:
-		if strings.TrimSpace(identity.IdentityValue) == "" {
-			return errors.New("用户身份索引 identity_value 不能为空")
+		// 用户名和三方身份保存规范明文值，不允许同时写哈希列。
+		if identity.IdentityHash != "" {
+			return errors.New("账号或三方身份索引 identity_hash 必须为空")
+		}
+		_, _, normalizedValue, normalizeErr := NormalizeUserIdentity(identity.IdentityType, identity.Provider, identity.IdentityValue)
+		if normalizeErr != nil || normalizedValue != identity.IdentityValue {
+			return errors.New("用户身份索引 identity_value 必须使用规范值")
 		}
 	}
+	// 分片号必须由用户 ID 唯一推导，禁止调用方自行指定错误路由。
 	wantShardNo := idgen.ShardNo(identity.UserID)
 	if identity.UserShardNo != wantShardNo {
 		return errors.Errorf("用户身份索引 user_shard_no=%d 与 user_id=%d 计算值 %d 不一致", identity.UserShardNo, identity.UserID, wantShardNo)
@@ -645,18 +751,17 @@ func validateUserShardNo(user *User) error {
 	return nil
 }
 
-// safeUserUpdates 过滤用户通用更新字段，敏感状态必须走认证版本联动专用流程。
+// safeUserUpdates 只保留当前模型明确允许的可变列，敏感状态必须走认证版本联动专用流程。
 func safeUserUpdates(updates map[string]any) map[string]any {
 	filtered := make(map[string]any, len(updates))
 	for key, value := range updates {
-		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "", "id", "shard_no", "username", "password_hash", "email", "phone", "status", "auth_version", "created_at":
-			continue
+		switch key {
+		case "nickname", "avatar", "last_login_at", "last_login_ip", "updated_at":
+			filtered[key] = value
 		case "email_ciphertext", "email_hash", "email_masked", "email_key_version",
 			"phone_ciphertext", "phone_hash", "phone_masked", "phone_key_version":
-			value = strings.TrimSpace(fmt.Sprint(value))
+			filtered[key] = fmt.Sprint(value)
 		}
-		filtered[key] = value
 	}
 	return filtered
 }

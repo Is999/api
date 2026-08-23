@@ -22,6 +22,7 @@ func (f *fakeRuntimeAlertNotifier) SendRuntimeAlert(_ context.Context, alert lar
 
 // TestRuntimeAlertSinkEnrichesSuppressesAndRefreshesConfig 验证告警补全、限频和配置快照刷新。
 func TestRuntimeAlertSinkEnrichesSuppressesAndRefreshesConfig(t *testing.T) {
+	// 固定时钟和初始配置使限频窗口及补全字段可重复验证。
 	notifier := &fakeRuntimeAlertNotifier{}
 	now := time.Date(2026, 7, 2, 10, 0, 0, 0, time.UTC)
 	sink := &runtimeAlertSink{
@@ -45,6 +46,7 @@ func TestRuntimeAlertSinkEnrichesSuppressesAndRefreshesConfig(t *testing.T) {
 		UniqueKey: "collector_enqueue_failed:auth.security:kafka",
 		Reason:    "kafka publish failed",
 	}
+	// 首次触发必须发送，并使用当前配置补全服务上下文。
 	sink.notify(context.Background(), alert)
 	if len(notifier.alerts) != 1 {
 		t.Fatalf("首次告警应发送一次，实际 %d", len(notifier.alerts))
@@ -57,15 +59,17 @@ func TestRuntimeAlertSinkEnrichesSuppressesAndRefreshesConfig(t *testing.T) {
 		t.Fatalf("首次告警触发次数或时间不符合预期: %+v", first)
 	}
 
+	// 窗口内相同指纹只累计次数，不重复发送。
 	now = now.Add(time.Minute)
 	sink.notify(context.Background(), alert)
 	if len(notifier.alerts) != 1 {
 		t.Fatalf("限频窗口内重复告警应被合并，实际发送 %d 次", len(notifier.alerts))
 	}
 
+	// 窗口结束后使用最新配置再次发送，并保留累计触发次数。
 	nextCfg := sink.cfg
 	nextCfg.AppID = "2"
-	nextCfg.Mode = "prod"
+	nextCfg.Mode = "pro"
 	nextCfg.Observability.ServiceName = "api-new"
 	sink.updateConfig(nextCfg)
 	now = now.Add(runtimeAlertSuppressWindow + time.Second)
@@ -74,7 +78,7 @@ func TestRuntimeAlertSinkEnrichesSuppressesAndRefreshesConfig(t *testing.T) {
 		t.Fatalf("限频窗口后告警应再次发送，实际 %d", len(notifier.alerts))
 	}
 	second := notifier.alerts[1]
-	if second.ServiceName != "api-new" || second.Environment != "prod" || second.AppID != "2" {
+	if second.ServiceName != "api-new" || second.Environment != "pro" || second.AppID != "2" {
 		t.Fatalf("告警配置快照未刷新: %+v", second)
 	}
 	if second.TriggerCount != 2 {

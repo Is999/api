@@ -1,4 +1,4 @@
 interface:
   display_name: "Go 测试失败排查"
   short_description: "复现并定位 Go 单测、全量测试、vet、race、编译、CI 与环境依赖失败。"
-  default_prompt: "使用 $go-test-failure-debugger 复现、定位并修复当前 Go 验证失败。"
+  default_prompt: "使用 $go-test-failure-debugger 先核对目标环境和命令副作用，再复现并定位验证失败；按用户已确认范围修复，只读任务交付证据。"

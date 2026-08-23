@@ -9,15 +9,14 @@ import (
 
 // IncludePaths 返回主配置声明的外部配置文件解析结果。
 func IncludePaths(mainFile string, files config.ConfigFilesConfig) []string {
-	if strings.TrimSpace(files.Runtime) == "" {
+	if files.Runtime == "" || files.Runtime != strings.TrimSpace(files.Runtime) {
 		return nil
 	}
 	return []string{resolveIncludePath(mainFile, files.Runtime)}
 }
 
-// resolveIncludePath 解析外部配置文件路径。
+// resolveIncludePath 相对主配置所在目录解析外置路径，不受进程工作目录影响。
 func resolveIncludePath(mainFile string, include string) string {
-	include = strings.TrimSpace(include)
 	if include == "" || filepath.IsAbs(include) {
 		return filepath.Clean(include)
 	}

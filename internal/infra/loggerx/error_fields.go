@@ -36,7 +36,7 @@ func ErrorTrace(err error) string {
 	return ErrorChain(err)
 }
 
-// ErrorCaller 返回错误链中最早的业务栈帧。
+// ErrorCaller 返回错误链中首个可解析的栈帧位置，不区分业务与运行库来源。
 func ErrorCaller(err error) string {
 	if err == nil {
 		return ""
@@ -86,7 +86,7 @@ type errorTraceNode struct {
 	Errs  []json.RawMessage `json:"errs"`  // Errs 保存多个下级错误节点。
 }
 
-// firstTraceCallerFromJSON 从错误链 JSON 中提取最早的业务栈帧。
+// firstTraceCallerFromJSON 从错误链 JSON 中按记录顺序提取首个可解析位置。
 func firstTraceCallerFromJSON(traceJSON string) string {
 	traceJSON = strings.TrimSpace(traceJSON)
 	if traceJSON == "" || traceJSON == "null" {
@@ -94,12 +94,13 @@ func firstTraceCallerFromJSON(traceJSON string) string {
 	}
 	var node errorTraceNode
 	if err := json.Unmarshal([]byte(traceJSON), &node); err != nil {
+		// 普通错误可能没有结构化栈，交由调用方继续尝试文本定位。
 		return ""
 	}
 	return firstTraceCallerFromNode(node)
 }
 
-// firstTraceCallerFromNode 按当前节点、单错误、多错误顺序查找业务栈帧。
+// firstTraceCallerFromNode 按当前节点、单错误、多错误顺序查找首个可解析位置。
 func firstTraceCallerFromNode(node errorTraceNode) string {
 	for _, frame := range node.Trace {
 		if caller := traceFrameLocation(frame); caller != "" {
@@ -117,7 +118,7 @@ func firstTraceCallerFromNode(node errorTraceNode) string {
 	return ""
 }
 
-// firstTraceCallerFromRaw 解析原始错误节点并提取业务栈帧。
+// firstTraceCallerFromRaw 解析嵌套错误节点；非结构化内容不提供栈帧位置。
 func firstTraceCallerFromRaw(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -129,7 +130,7 @@ func firstTraceCallerFromRaw(raw json.RawMessage) string {
 	return firstTraceCallerFromNode(node)
 }
 
-// firstTraceCallerFromText 从文本错误链中提取业务栈帧。
+// firstTraceCallerFromText 从文本错误链中提取文件位置，不筛除运行库栈帧。
 func firstTraceCallerFromText(traceText string) string {
 	traceText = strings.TrimSpace(traceText)
 	if traceText == "" {
@@ -138,12 +139,13 @@ func firstTraceCallerFromText(traceText string) string {
 	return traceFrameLocation(traceText)
 }
 
-// traceFrameLocation 从单个栈帧文本中截取短文件名和行号。
+// traceFrameLocation 从单个栈帧文本中截取原有文件路径和行号，不裁剪路径层级。
 func traceFrameLocation(frame string) string {
 	frame = strings.TrimSpace(frame)
 	if frame == "" {
 		return ""
 	}
+	// 带函数名的栈帧把文件位置放在末尾括号内，先去掉函数部分。
 	if start := strings.LastIndex(frame, " ("); start >= 0 && strings.HasSuffix(frame, ")") {
 		frame = strings.TrimSuffix(frame[start+2:], ")")
 	}
@@ -151,6 +153,7 @@ func traceFrameLocation(frame string) string {
 	if idx < 0 {
 		return ""
 	}
+	// 行号只消费连续数字，后续错误文本不属于可点击的源码位置。
 	end := idx + len(".go:")
 	for end < len(frame) && frame[end] >= '0' && frame[end] <= '9' {
 		end++

@@ -42,6 +42,7 @@ func (l *SystemLogic) RunConfigReload() *types.BizResult {
 			SetI18nMessage(i18n.MsgKeyServiceBusy).
 			WithError(errors.New("配置热加载未启用或未绑定执行器"))
 	}
+	// 等待本次重载结束再读取状态，响应不能提前沿用上一次执行结果。
 	if err := l.Svc.ConfigReload.ReloadConfig(l.Ctx, "manual_api"); err != nil {
 		return types.ServerError(i18n.MsgKeyInternalError, err, "SystemLogic.RunConfigReload").ToBizResult()
 	}

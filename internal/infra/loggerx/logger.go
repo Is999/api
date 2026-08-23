@@ -18,36 +18,36 @@ const (
 	// goUtilsCallerSkip 表示 go-utils 日志适配器自身增加的一层封装。
 	goUtilsCallerSkip = 1
 
-	fieldTraceID      = "trace_id"      // trace id 日志字段名
-	fieldSpanID       = "span_id"       // span id 日志字段名
-	fieldRoute        = "route"         // 稳定路由别名字段名
-	fieldHTTPMethod   = "http_method"   // HTTP 方法字段名
-	fieldPath         = "path"          // HTTP 路径字段名
-	fieldLocale       = "locale"        // 请求语言字段名
-	fieldIP           = "ip"            // 客户端 IP 字段名
-	fieldUID          = "uid"           // 用户 ID 短字段名
-	fieldUserID       = "user_id"       // 用户 ID 字段名
-	fieldUserName     = "user_name"     // 用户名字段名
-	fieldNode         = "node"          // 服务节点或工作流节点字段名
-	fieldMode         = "mode"          // 运行模式字段名
-	fieldHTTPStatus   = "http_status"   // HTTP 状态码字段名
-	fieldBizCode      = "biz_code"      // 业务码字段名
-	fieldBizMessage   = "biz_message"   // 业务响应文案字段名
-	fieldError        = "error"         // 错误摘要字段名
-	fieldErrorChain   = "error_chain"   // 错误链字段名
-	fieldErrorTrace   = "error_trace"   // 错误追踪文本字段名
-	fieldErrorCaller  = "error_caller"  // 错误产生位置字段名
-	fieldCaller       = "caller"        // 业务定位 caller 字段名
-	fieldLogCaller    = "log_caller"    // 日志打印 caller 字段名
-	fieldErrorMsg     = "error_message" // 错误消息字段名
-	fieldTaskID       = "task_id"       // 异步任务 ID 字段名
-	fieldWorkflowID   = "workflow_id"   // 工作流 ID 字段名
-	fieldWorkflowNode = "workflow_node" // 工作流节点字段名
-	fieldShard        = "shard"         // 分片摘要字段名
-	fieldShardIndex   = "shard_index"   // 分片索引字段名
-	fieldShardTotal   = "shard_total"   // 分片总数字段名
-	fieldLatencyMS    = "latency_ms"    // 耗时毫秒数字段名
-	fieldSuccess      = "success"       // 成功状态字段名
+	fieldTraceID      = "trace_id"      // 请求/任务上下文的 Trace ID，用于串联跨服务日志
+	fieldSpanID       = "span_id"       // 当前 span 标识，定位同一 trace 内的调用片段
+	fieldRoute        = "route"         // 路由元数据的稳定别名，用于接口聚合
+	fieldHTTPMethod   = "http_method"   // HTTP 请求方法，区分同一路径的动作
+	fieldPath         = "path"          // 原始请求路径，只作为 content 详情
+	fieldLocale       = "locale"        // 请求语言，只作为 content 详情
+	fieldIP           = "ip"            // 原始 IP 标识；API 元数据导出不生成该字段
+	fieldUID          = "uid"           // 业务用户 ID 短名，不提升为顶层索引
+	fieldUserID       = "user_id"       // 认证上下文中的稳定用户 ID，用于索引检索
+	fieldUserName     = "user_name"     // 原始用户名标识；API 元数据导出不生成该字段
+	fieldNode         = "node"          // 进程节点或当前工作流执行节点，用于定位实例
+	fieldMode         = "mode"          // 请求/任务携带的执行模式
+	fieldHTTPStatus   = "http_status"   // 已确定的 HTTP 响应状态，与业务码分开记录
+	fieldBizCode      = "biz_code"      // 统一响应业务码，用于区分业务失败
+	fieldBizMessage   = "biz_message"   // 对外响应文案，只作为 content 详情
+	fieldError        = "error"         // 上层传入的错误摘要，供失败事件检索
+	fieldErrorChain   = "error_chain"   // go-utils 错误链，保留逐层包装上下文
+	fieldErrorTrace   = "error_trace"   // 错误链的人读文本，只作为 content 详情
+	fieldErrorCaller  = "error_caller"  // 错误链定位点，优先用于错误日志 caller
+	fieldCaller       = "caller"        // 业务调用点；错误日志优先使用错误产生处
+	fieldLogCaller    = "log_caller"    // 与错误产生处不同的实际打印点
+	fieldErrorMsg     = "error_message" // 请求元数据中的对外错误消息
+	fieldTaskID       = "task_id"       // 异步任务实例标识，用于串联任务日志
+	fieldWorkflowID   = "workflow_id"   // 同一工作流实例的共享标识
+	fieldWorkflowNode = "workflow_node" // 当前 DAG 节点，同时映射到 node 索引
+	fieldShard        = "shard"         // shard_index/shard_total 组合摘要
+	fieldShardIndex   = "shard_index"   // 任务负载中的分片下标，总数有效时才写入
+	fieldShardTotal   = "shard_total"   // 任务负载中的分片总数，非正数不写入
+	fieldLatencyMS    = "latency_ms"    // 请求、任务或下游调用耗时，单位毫秒
+	fieldSuccess      = "success"       // 调用方记录的最终请求或任务结果
 )
 
 // 带单位的通用日志字段名。
@@ -67,7 +67,6 @@ var publicLogFieldNames = map[string]struct{}{
 	fieldSpanID:      {},
 	fieldRoute:       {},
 	fieldHTTPMethod:  {},
-	fieldIP:          {},
 	fieldUserID:      {},
 	fieldHTTPStatus:  {},
 	fieldBizCode:     {},
@@ -186,6 +185,7 @@ func splitLogFields(msg string, fields []logx.LogField) (string, []logx.LogField
 	}
 	publicFields := make([]logx.LogField, 0, len(fields))
 	details := make([]string, 0, len(fields))
+	// 公共字段保留为索引，其余只进入正文；两组均维持调用方顺序。
 	for _, field := range fields {
 		field.Key = strings.TrimSpace(field.Key)
 		if field.Key == "" {
@@ -270,7 +270,7 @@ func formatLogString(value string) string {
 	return value
 }
 
-// appendLogFields 合并日志字段，保持调用方字段在前。
+// appendLogFields 复制后追加字段，避免复用底层切片使并发日志串写。
 func appendLogFields(base []logx.LogField, extra ...logx.LogField) []logx.LogField {
 	merged := make([]logx.LogField, 0, len(base)+len(extra))
 	merged = append(merged, base...)
@@ -283,7 +283,7 @@ func runtimeCallerSkip(skip int) int {
 	return loggerxRuntimeCallerSkip + positiveSkip(skip)
 }
 
-// appendErrorCallerFields 优先使用 error 产生位置作为业务 caller。
+// appendErrorCallerFields 优先使用错误链定位点，无栈信息时改用日志调用点。
 func appendErrorCallerFields(fields []logx.LogField, err error, logCaller string) []logx.LogField {
 	sourceCaller := ErrorCaller(err)
 	if sourceCaller == "" {

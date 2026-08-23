@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"api/internal/handler/shared"
-	"api/internal/svc"
 )
 
 // RouteSpecs 返回内网配置热加载路由规格。
@@ -16,9 +15,7 @@ func RouteSpecs() []shared.RouteSpec {
 			Meta:         shared.SystemConfigReloadStatus,
 			DocumentPath: shared.RouteDocSystem,
 			Chain:        shared.RouteSecurityInternal,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return ConfigReloadStatusHandler(svcCtx)
-			},
+			Handler:      ConfigReloadStatusHandler,
 		},
 		{
 			Method:       http.MethodGet,
@@ -26,9 +23,7 @@ func RouteSpecs() []shared.RouteSpec {
 			Meta:         shared.SystemConfigReloadItems,
 			DocumentPath: shared.RouteDocSystem,
 			Chain:        shared.RouteSecurityInternal,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return ConfigReloadItemsHandler(svcCtx)
-			},
+			Handler:      ConfigReloadItemsHandler,
 		},
 		{
 			Method:       http.MethodPost,
@@ -36,9 +31,7 @@ func RouteSpecs() []shared.RouteSpec {
 			Meta:         shared.SystemConfigReloadRun,
 			DocumentPath: shared.RouteDocSystem,
 			Chain:        shared.RouteSecurityInternal,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return RunConfigReloadHandler(svcCtx)
-			},
+			Handler:      RunConfigReloadHandler,
 		},
 	}
 }

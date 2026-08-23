@@ -1,41 +1,101 @@
+# CI 依次执行测试和构建阶段。
 stages:
   - test
   - build
 
+# Go 缓存放在项目目录，供同分支流水线复用。
 variables:
+  # 拉取完整历史供增量检查计算分支差异。
   GIT_DEPTH: "0"
+  # Go 模块下载缓存目录。
   GOMODCACHE: "$CI_PROJECT_DIR/.cache/go/pkg/mod"
+  # Go 编译缓存目录。
   GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
 
+# 缓存按分支隔离，避免不同分支产物互相污染。
 cache:
+  # 使用 GitLab 规范化分支名作为缓存键。
   key: "$CI_COMMIT_REF_SLUG"
+  # 仅缓存模块和编译中间产物。
   paths:
     - .cache/go/pkg/mod
     - .cache/go-build
 
+# 单元测试和仓库静态检查入口。
 test:
+  # Go 版本必须与 go.mod 工具链一致。
   image: golang:1.26.6
+  # 测试失败时阻止后续构建。
   stage: test
+  # 拉取基线后执行项目统一 CI 目标。
   script:
     - 'git fetch --no-tags origin "$CI_DEFAULT_BRANCH:refs/remotes/origin/$CI_DEFAULT_BRANCH"'
     - 'BRANCH_BASE="origin/$CI_DEFAULT_BRANCH" make ci'
 
-prometheus-rules:
-  image:
-    name: prom/prometheus:v2.55.1
-    entrypoint: [""]
+# integration 使用独立 MySQL 服务执行真实 DDL、迁移锁和回滚链路，不复用单元测试内存库。
+integration:
+  # 固定与项目声明一致的 Go 工具链。
+  image: golang:1.26.6
+  # 集成测试属于合并前测试阶段。
   stage: test
+  # MySQL 服务只在当前 CI Job 网络内可见，数据随 Job 销毁。
+  services:
+    # 集成测试使用临时 MySQL 8.0 实例。
+    - name: mysql:8.0
+      # Job 容器通过固定别名连接数据库。
+      alias: mysql
+      # 设置临时服务的默认字符集和排序规则；各表以初始化 DDL 的显式声明为准。
+      command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+  # 变量只作用于当前临时数据库服务。
+  variables:
+    # CI 临时实例 root 密码，不对应任何部署环境凭据。
+    MYSQL_ROOT_PASSWORD: "password"
+    # 允许 Job 容器通过 service 网络连接临时 root 账号。
+    MYSQL_ROOT_HOST: "%"
+    # CI 启动时创建的独占空库；迁移夹具只接受 _test 后缀。
+    MYSQL_DATABASE: "api_test"
+    # integration 标签连接本 Job 的临时库；已有目标表会拒绝测试，不执行预清理。
+    INTEGRATION_MYSQL_DSN: "root:password@tcp(mysql:3306)/api_test?charset=utf8mb4&parseTime=true&loc=UTC"
+  # 先安装客户端并等待 MySQL 健康后再执行测试。
+  before_script:
+    # 安装 MySQL 探测客户端，避免服务尚未就绪时误判代码失败。
+    - apt-get update && apt-get install -y --no-install-recommends default-mysql-client
+    # 最多等待 120 秒；超时由 shell 非零退出并归类为 CI 依赖未就绪。
+    - 'for i in $(seq 1 120); do mysqladmin ping -hmysql -uroot -p"$MYSQL_ROOT_PASSWORD" --silent && break; test "$i" -eq 120 && exit 1; sleep 1; done'
+  # 只运行带 integration 标签的真实数据库用例。
+  script:
+    # 只运行真实数据库测试，不启动本地 Docker Compose。
+    - make integration-test-run
+
+# Prometheus 规则独立执行官方语法校验。
+prometheus-rules:
+  # promtool 来自官方 Prometheus 镜像。
+  image:
+    # 版本固定，避免校验语义随 latest 漂移。
+    name: prom/prometheus:v2.55.1
+    # 清空默认入口以直接执行 promtool。
+    entrypoint: [""]
+  # 规则校验属于测试阶段。
+  stage: test
+  # 检查仓库内全部 Prometheus 规则文件。
   script:
     - promtool check rules docs/prometheus/*.yml
 
+# 测试通过后构建命令和发布压缩包。
 build:
+  # 构建使用与测试相同的 Go 工具链。
   image: golang:1.26.6
+  # 仅在测试阶段成功后执行。
   stage: build
+  # 同时生成服务、迁移工具和分发包。
   script:
     - make build build-tools package VERSION="$CI_COMMIT_SHORT_SHA"
+  # 保存可执行文件和发布压缩包供后续部署下载。
   artifacts:
+    # 只上传当前构建生成的交付文件。
     paths:
       - bin/api
       - bin/api-migrate
       - dist/*.tar.gz
+    # 构建产物保留七天。
     expire_in: 7 days

@@ -2,28 +2,13 @@ package handler
 
 import (
 	"api/internal/handler/shared"
-	"api/internal/middleware"
-)
-
-// RouteSecurityChain 表示路由实际挂载的安全链路。
-type RouteSecurityChain = shared.RouteSecurityChain
-
-// 路由安全链路枚举常量。
-const (
-	// RouteSecurityNone 表示路由不经过前台签名、加密或 JWT 链路。
-	RouteSecurityNone = shared.RouteSecurityNone
-	// RouteSecurityPublic 表示路由经过签名和加密链路，但不校验 JWT。
-	RouteSecurityPublic = shared.RouteSecurityPublic
-	// RouteSecurityAuth 表示路由必须校验 JWT 与 Redis session。
-	RouteSecurityAuth = shared.RouteSecurityAuth
-	// RouteSecurityInternal 表示路由必须校验内网来源、Ops HMAC 和 nonce 防重放。
-	RouteSecurityInternal = shared.RouteSecurityInternal
+	"api/internal/routealias"
 )
 
 // RouteSecurityContract 描述内置路由别名对应的安全链路契约。
 type RouteSecurityContract struct {
-	Alias middleware.RouteAlias // 路由别名
-	Chain RouteSecurityChain    // 安全链路
+	Alias routealias.Alias          // 路由别名
+	Chain shared.RouteSecurityChain // 安全链路
 }
 
 // DefaultRouteSecurityContracts 返回内置路由安全链路契约集合。

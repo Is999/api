@@ -18,6 +18,7 @@ import (
 
 // TestInfowSkipUsesOuterCallSite 验证调用方可以按需补充封装层数。
 func TestInfowSkipUsesOuterCallSite(t *testing.T) {
+	// 本包用例替换进程级 logx writer，不能并行执行；结束后恢复原 writer。
 	var buffer bytes.Buffer
 	previousWriter := logx.Reset()
 	logx.SetWriter(wrapLogWriter(logx.NewWriter(&buffer)))
@@ -78,6 +79,7 @@ func logGoUtilsInfoCallerProbe() string {
 
 // TestInfowMovesDetailFieldsToContent 验证非公共字段进入 content，不再扩散成日志平台顶层字段。
 func TestInfowMovesDetailFieldsToContent(t *testing.T) {
+	// 临时接管全局 writer，并在用例结束后恢复日志环境。
 	var buffer bytes.Buffer
 	previousWriter := logx.Reset()
 	logx.SetWriter(wrapLogWriter(logx.NewWriter(&buffer)))
@@ -87,6 +89,7 @@ func TestInfowMovesDetailFieldsToContent(t *testing.T) {
 		logx.SetLevel(logx.InfoLevel)
 	})
 
+	// 上下文同时包含公共索引字段和不得提升或泄漏的详情字段。
 	ctx := requestctx.WithMeta(context.Background(), &requestctx.Meta{
 		TraceID:    "trace-1",
 		Route:      "user.detail",
@@ -103,11 +106,11 @@ func TestInfowMovesDetailFieldsToContent(t *testing.T) {
 		logx.Field("bytes", 128),
 	)
 
+	// 公共字段保留为顶层索引，其余详情收口到 content。
 	entry := decodeLogEntry(t, buffer.String())
 	assertEntryValue(t, entry, fieldTraceID, "trace-1")
 	assertEntryValue(t, entry, fieldRoute, "user.detail")
 	assertEntryValue(t, entry, fieldHTTPMethod, "GET")
-	assertEntryValue(t, entry, fieldIP, "127.0.0.1")
 	assertEntryValue(t, entry, fieldHTTPStatus, "200")
 	assertEntryValue(t, entry, fieldUserID, "7")
 	assertEntryMissing(t, entry, "detail")
@@ -117,9 +120,15 @@ func TestInfowMovesDetailFieldsToContent(t *testing.T) {
 	assertEntryMissing(t, entry, fieldBizMessage)
 	assertEntryMissing(t, entry, fieldLogCaller)
 	content := fmt.Sprint(entry["content"])
-	for _, want := range []string{`detail="select * from demo"`, "bytes=128", "path=/api/users/7", "user_name=tester", "biz_message=成功"} {
+	for _, want := range []string{`detail="select * from demo"`, "bytes=128", "path=/api/users/7", "biz_message=成功"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("content should contain %q, got %s", want, content)
+		}
+	}
+	// 原始 IP 和用户名属于敏感信息，整个日志文本都不得出现。
+	for _, forbidden := range []string{"127.0.0.1", "tester", "user_name"} {
+		if strings.Contains(buffer.String(), forbidden) {
+			t.Fatalf("日志不应包含原始身份字段 %q，实际=%s", forbidden, buffer.String())
 		}
 	}
 }
@@ -151,12 +160,32 @@ func TestBindContextKeepsOnlyPublicFields(t *testing.T) {
 	assertEntryValue(t, entry, fieldTraceID, "trace-1")
 	assertEntryValue(t, entry, fieldRoute, "user.detail")
 	assertEntryValue(t, entry, fieldHTTPMethod, "GET")
-	assertEntryValue(t, entry, fieldIP, "127.0.0.1")
 	assertEntryValue(t, entry, fieldUserID, "7")
 	assertEntryMissing(t, entry, fieldUID)
 	assertEntryMissing(t, entry, fieldPath)
 	assertEntryMissing(t, entry, fieldUserName)
 	assertEntryMissing(t, entry, fieldBizMessage)
+	if strings.Contains(buffer.String(), "127.0.0.1") || strings.Contains(buffer.String(), "tester") {
+		t.Fatalf("绑定上下文不应输出原始 IP 或用户名，实际=%s", buffer.String())
+	}
+}
+
+// TestTraceAttributesExcludeRawIdentity 验证 trace 只保留稳定用户 ID，不写入原始 IP 或用户名。
+func TestTraceAttributesExcludeRawIdentity(t *testing.T) {
+	attrs := TraceAttributesFromMeta(&requestctx.Meta{ClientIP: "127.0.0.1", UserID: 7, UserName: "tester"})
+	seenUserID := false
+	for _, attr := range attrs {
+		key := string(attr.Key)
+		if key == "enduser.id" {
+			seenUserID = true
+		}
+		if key == "client.address" || key == "app.client_ip" || key == "enduser.name" || key == "app.user_name" {
+			t.Fatalf("trace 不应包含原始身份属性: %s", key)
+		}
+	}
+	if !seenUserID {
+		t.Fatal("trace 应保留稳定用户 ID")
+	}
 }
 
 // TestExplicitFieldsOverrideContextFields 验证调用点字段优先于上下文默认值。

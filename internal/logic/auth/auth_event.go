@@ -95,7 +95,7 @@ type authEventPayload struct {
 	OccurredAtUnix int64  `json:"occurred_at_unix"`         // 事件发生时间，Unix 秒
 }
 
-// emitAuthEvent 投递认证风控事件；Collector 不可用时不影响主业务流程。
+// emitAuthEvent 在不阻断认证流程的前提下投递风控事件。
 func (l *AuthLogic) emitAuthEvent(input AuthEventInput) {
 	if l == nil {
 		return
@@ -103,9 +103,12 @@ func (l *AuthLogic) emitAuthEvent(input AuthEventInput) {
 	RecordAuthEvent(l.Ctx, l.Svc, input)
 }
 
-// RecordAuthEvent 将认证风控事件写入轻量 Collector。
+// RecordAuthEvent 将认证风控事件按旁路策略写入 Collector。
 func RecordAuthEvent(ctx context.Context, svcCtx *svc.ServiceContext, input AuthEventInput) {
-	if svcCtx == nil || svcCtx.Collector == nil || strings.TrimSpace(input.Action) == "" {
+	if svcCtx == nil || svcCtx.Collector == nil {
+		return
+	}
+	if strings.TrimSpace(input.Action) == "" {
 		return
 	}
 	cfg := svcCtx.CurrentConfig()
@@ -115,11 +118,15 @@ func RecordAuthEvent(ctx context.Context, svcCtx *svc.ServiceContext, input Auth
 	payload := buildAuthEventPayload(ctx, cfg, input)
 	data, err := json.Marshal(payload)
 	if err != nil {
+		// 负载序列化异常同样按旁路失败处理，避免监控链反向阻断认证请求。
 		return
 	}
-	// 认证结果不能被 Kafka 写超时拖住，使用独立短期限且不继承响应结束后的取消信号。
-	enqueueCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), authEventEnqueueTimeout)
+	// 响应结束后仍允许已产生的旁路事件继续投递。
+	enqueueBaseCtx := context.WithoutCancel(ctx)
+	// 短超时限制 Kafka 投递占用认证请求资源的时间。
+	enqueueCtx, cancel := context.WithTimeout(enqueueBaseCtx, authEventEnqueueTimeout)
 	defer cancel()
+	// Collector 已负责失败告警，因此认证主链忽略投递返回值。
 	_, _ = svcCtx.Collector.Enqueue(enqueueCtx, collectorx.Event{
 		BizType:      AuthCollectorBizType,
 		PartitionKey: authEventPartitionKey(payload),
@@ -133,7 +140,7 @@ func buildAuthEventPayload(ctx context.Context, cfg config.Config, input AuthEve
 	clientIP := strings.TrimSpace(input.ClientIP)
 	payload := authEventPayload{
 		Action:         strings.TrimSpace(input.Action),
-		AppID:          strings.TrimSpace(cfg.AppID),
+		AppID:          cfg.AppID,
 		Reason:         strings.TrimSpace(input.Reason),
 		Count:          input.Count,
 		OccurredAtUnix: time.Now().Unix(),
@@ -143,6 +150,7 @@ func buildAuthEventPayload(ctx context.Context, cfg config.Config, input AuthEve
 	}
 	if meta != nil {
 		if clientIP == "" {
+			// 调用方未提供客户端 IP 时复用已校验的请求元数据。
 			clientIP = meta.ClientIP
 		}
 		payload.Route = strings.TrimSpace(meta.Route)
@@ -157,9 +165,10 @@ func buildAuthEventPayload(ctx context.Context, cfg config.Config, input AuthEve
 	if payload.Mode == "" {
 		payload.Mode = strings.TrimSpace(cfg.Mode)
 	}
-	payload.IdentityHash = authEventHash(cfg, input.Identity)
-	payload.ClientIPHash = authEventHash(cfg, clientIP)
-	payload.SessionHash = authEventHash(cfg, input.SessionID)
+	// 原始身份、IP 和 sid 到此为止，Collector 负载只携带可关联的 HMAC 摘要。
+	payload.IdentityHash = authSensitiveValueHash(cfg, input.Identity)
+	payload.ClientIPHash = authSensitiveValueHash(cfg, clientIP)
+	payload.SessionHash = authSensitiveValueHash(cfg, input.SessionID)
 	return payload
 }
 
@@ -182,21 +191,13 @@ func authEventPartitionKey(payload authEventPayload) string {
 	return payload.AppID + ":" + hash
 }
 
-// authEventHash 使用应用密钥对敏感字段做不可逆关联哈希。
-func authEventHash(cfg config.Config, value string) string {
+// authSensitiveValueHash 使用应用密钥对认证链路中的敏感字段做不可逆关联哈希。
+func authSensitiveValueHash(cfg config.Config, value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
 		return ""
 	}
-	secret := strings.TrimSpace(cfg.AppKey)
-	if secret == "" {
-		secret = strings.TrimSpace(cfg.JwtSecret)
-	}
-	if secret == "" {
-		sum := sha256.Sum256([]byte(value))
-		return hex.EncodeToString(sum[:])
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
+	mac := hmac.New(sha256.New, []byte(cfg.AppKey))
 	_, _ = mac.Write([]byte(value))
 	return hex.EncodeToString(mac.Sum(nil))
 }

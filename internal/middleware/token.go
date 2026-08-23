@@ -10,7 +10,6 @@ import (
 
 	keys "api/common/rediskeys"
 	"api/common/runtimecfg"
-	"api/internal/config"
 	"api/internal/svc"
 
 	"github.com/Is999/go-utils/errors"
@@ -27,6 +26,8 @@ var (
 	errTokenExpired = errors.New("Token 已过期")
 	// errSessionExpired 表示服务端 Redis 会话不存在或已过期。
 	errSessionExpired = errors.New("会话已过期")
+	// errAuthDependencyUnavailable 表示 Redis 会话存储暂时不可用，客户端 token 本身未被判为无效。
+	errAuthDependencyUnavailable = errors.New("鉴权依赖不可用")
 )
 
 // maxBearerTokenBytes 限制 JWT 文本大小，避免未认证请求用超长 Header 放大解析和日志开销。
@@ -64,20 +65,26 @@ func bearerToken(header string) (string, error) {
 
 // VerifyUserToken 统一校验前台 JWT，并按需校验 Redis 中的登录会话。
 func VerifyUserToken(ctx context.Context, svcCtx *svc.ServiceContext, tokenString string, requireSession bool) (*UserTokenIdentity, error) {
-	cfg := config.Config{}
-	if svcCtx != nil {
-		cfg = svcCtx.CurrentConfig()
+	if svcCtx == nil {
+		return nil, errInvalidToken
 	}
-	if svcCtx == nil || strings.TrimSpace(cfg.JwtSecret) == "" || strings.TrimSpace(tokenString) == "" || len(tokenString) > maxBearerTokenBytes {
+	cfg := svcCtx.CurrentConfig()
+	if cfg.JwtSecret == "" {
+		return nil, errInvalidToken
+	}
+	if strings.TrimSpace(tokenString) == "" || len(tokenString) > maxBearerTokenBytes {
 		return nil, errInvalidToken
 	}
 
 	claims := jwt.MapClaims{}
 	parser := jwt.NewParser(
+		// JSON Number 防止认证版本等整数声明丢失精度。
 		jwt.WithJSONNumber(),
+		// 算法白名单拒绝客户端替换 JWT 签名方法。
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
 	)
-	token, err := parser.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (interface{}, error) {
+	token, err := parser.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (any, error) {
+		// 回调再次固定算法，避免解析器配置变化时接受其它 HMAC 方法。
 		if t.Method != jwt.SigningMethodHS256 {
 			return nil, errors.Wrap(errInvalidToken, "签名算法不匹配")
 		}
@@ -85,11 +92,14 @@ func VerifyUserToken(ctx context.Context, svcCtx *svc.ServiceContext, tokenStrin
 	})
 	if err != nil || !token.Valid {
 		if errors.Is(err, jwt.ErrTokenExpired) {
+			// 过期 token 保留独立错误类型供外层映射。
 			return nil, errTokenExpired
 		}
+		// 其它解析和签名错误统一收敛为无效 token。
 		return nil, errInvalidToken
 	}
 
+	// JWT 声明使用严格类型读取，缺失或非规范值均拒绝。
 	userID, ok := jwtPositiveStringInt64Claim(claims, "sub")
 	if !ok {
 		return nil, errInvalidToken
@@ -118,14 +128,15 @@ func VerifyUserToken(ctx context.Context, svcCtx *svc.ServiceContext, tokenStrin
 		return nil, errInvalidToken
 	}
 	issuer, ok := jwtStringClaim(claims, "iss")
-	if !ok || strings.TrimSpace(cfg.Auth.Issuer) == "" || issuer != strings.TrimSpace(cfg.Auth.Issuer) {
+	if !ok || cfg.Auth.Issuer == "" || issuer != cfg.Auth.Issuer {
 		return nil, errInvalidToken
 	}
 	userName, ok := jwtStringClaim(claims, "username")
 	if !ok {
 		return nil, errInvalidToken
 	}
-	if strings.TrimSpace(cfg.AppID) != runtimecfg.AppID() {
+	// 配置快照必须与进程级 Redis 命名空间一致，避免跨 AppID 查询会话。
+	if cfg.AppID != runtimecfg.AppID() {
 		return nil, errInvalidToken
 	}
 	identity := &UserTokenIdentity{
@@ -137,12 +148,15 @@ func VerifyUserToken(ctx context.Context, svcCtx *svc.ServiceContext, tokenStrin
 		AuthVersion: authVersion,
 		ExpiresAt:   exp,
 	}
+	// 仅解析场景在 JWT 契约通过后返回，不访问 Redis 会话。
 	if !requireSession {
 		return identity, nil
 	}
+	// 强会话校验缺少 Redis 时禁止退化为纯 JWT。
 	if svcCtx.Rds == nil {
-		return identity, errInvalidToken
+		return identity, errors.Wrap(errAuthDependencyUnavailable, "Redis 会话存储未初始化")
 	}
+	// Lua 原子核对 Redis 会话记录，避免校验期间被并发轮换。
 	verified, err := userSessionVerifyScript.Run(
 		ctx,
 		svcCtx.Rds,
@@ -153,7 +167,8 @@ func VerifyUserToken(ctx context.Context, svcCtx *svc.ServiceContext, tokenStrin
 		time.Now().UnixMilli(),
 	).Int64()
 	if err != nil {
-		return identity, errInvalidToken
+		// Redis 故障归类为依赖不可用，不能伪装成会话过期。
+		return identity, errors.Wrap(errAuthDependencyUnavailable, err.Error())
 	}
 	if verified != 1 {
 		return identity, errSessionExpired
@@ -164,10 +179,10 @@ func VerifyUserToken(ctx context.Context, svcCtx *svc.ServiceContext, tokenStrin
 // jwtPositiveStringInt64Claim 读取使用十进制字符串承载的正整数 JWT 声明。
 func jwtPositiveStringInt64Claim(claims jwt.MapClaims, name string) (int64, bool) {
 	item, ok := claims[name].(string)
-	if !ok {
+	if !ok || item == "" || item != strings.TrimSpace(item) {
 		return 0, false
 	}
-	parsed, err := strconv.ParseInt(strings.TrimSpace(item), 10, 64)
+	parsed, err := strconv.ParseInt(item, 10, 64)
 	return parsed, err == nil && parsed > 0
 }
 
@@ -183,11 +198,7 @@ func jwtPositiveInt64Claim(claims jwt.MapClaims, name string) (int64, bool) {
 
 // jwtPositiveUint64Claim 读取必须为正整数的 uint64 JWT 声明。
 func jwtPositiveUint64Claim(claims jwt.MapClaims, name string) (uint64, bool) {
-	value, exists := claims[name]
-	if !exists {
-		return 0, false
-	}
-	item, ok := value.(json.Number)
+	item, ok := claims[name].(json.Number)
 	if !ok {
 		return 0, false
 	}
@@ -198,8 +209,7 @@ func jwtPositiveUint64Claim(claims jwt.MapClaims, name string) (uint64, bool) {
 // jwtStringClaim 读取必须为非空字符串的 JWT 声明。
 func jwtStringClaim(claims jwt.MapClaims, name string) (string, bool) {
 	value, ok := claims[name].(string)
-	value = strings.TrimSpace(value)
-	return value, ok && value != ""
+	return value, ok && value != "" && value == strings.TrimSpace(value)
 }
 
 // VerifyUserTokenFromRequest 从 HTTP 请求中提取并校验前台用户 token。
@@ -213,7 +223,5 @@ func VerifyUserTokenFromRequest(ctx context.Context, svcCtx *svc.ServiceContext,
 
 // tokenAppIDMatches 判断 token 中的 app_id 是否匹配当前服务命名空间。
 func tokenAppIDMatches(configAppID string, claimAppID string) bool {
-	expected := strings.TrimSpace(configAppID)
-	claimAppID = strings.TrimSpace(claimAppID)
-	return expected != "" && claimAppID != "" && claimAppID == expected
+	return configAppID != "" && claimAppID != "" && claimAppID == configAppID
 }

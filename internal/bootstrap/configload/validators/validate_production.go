@@ -9,20 +9,16 @@ import (
 )
 
 const (
-	minAppKeyLength   = 16 // 生产 app_key 最小长度
 	minOpsTokenLength = 16 // 运维令牌生产环境最小长度
 )
 
 // ValidateProduction 校验生产环境禁止使用的占位和不安全配置。
 func ValidateProduction(c config.Config) error {
-	if !isProductionMode(c.Mode) {
+	if !config.IsProductionMode(c.Mode) {
 		return nil
 	}
 	if isPlaceholderSecret(c.JwtSecret) {
 		return errors.Errorf("生产环境 jwt_secret 不能使用占位值")
-	}
-	if len(strings.TrimSpace(c.AppKey)) < minAppKeyLength {
-		return errors.Errorf("生产环境 app_key 长度不能小于 %d", minAppKeyLength)
 	}
 	if isPlaceholderSecret(c.AppKey) {
 		return errors.Errorf("生产环境 app_key 不能使用占位值")
@@ -35,7 +31,7 @@ func ValidateProduction(c config.Config) error {
 	}
 	// authTask 是生产认证风控事件的固定 Kafka 路由。
 	authTask, ok := c.Collector.Tasks[config.CollectorBizTypeAuthSecurity]
-	if !ok || strings.TrimSpace(authTask.Topic) != config.CollectorTopicAuthSecurity {
+	if !ok || authTask.Topic != config.CollectorTopicAuthSecurity {
 		return errors.Errorf("生产环境 collector.tasks.%s.topic 必须配置为 %s", config.CollectorBizTypeAuthSecurity, config.CollectorTopicAuthSecurity)
 	}
 	if !c.Auth.LoginRateLimit.Enabled {
@@ -44,7 +40,10 @@ func ValidateProduction(c config.Config) error {
 	if c.Auth.RegisterEnabled && !c.Auth.RegisterRateLimit.Enabled {
 		return errors.Errorf("生产环境开放注册时必须启用 auth.register_rate_limit")
 	}
-	token := strings.TrimSpace(c.Ops.ConfigReloadToken)
+	token := c.Ops.ConfigReloadToken
+	if token != strings.TrimSpace(token) {
+		return errors.Errorf("生产环境 ops.config_reload_token 不能包含首尾空白")
+	}
 	if len(token) < minOpsTokenLength {
 		return errors.Errorf("生产环境 ops.config_reload_token 长度不能小于 %d", minOpsTokenLength)
 	}
@@ -52,16 +51,6 @@ func ValidateProduction(c config.Config) error {
 		return errors.Errorf("生产环境 ops.config_reload_token 不能使用占位值")
 	}
 	return nil
-}
-
-// isProductionMode 判断当前配置是否为生产运行模式。
-func isProductionMode(mode string) bool {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "pro", "prod", "production":
-		return true
-	default:
-		return false
-	}
 }
 
 // isPlaceholderSecret 判断密钥是否仍为示例占位值。

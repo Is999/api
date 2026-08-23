@@ -4,6 +4,7 @@ import "testing"
 
 // TestSplitMigrationStatements 确保多语句 SQL 不依赖 MySQL multiStatements DSN。
 func TestSplitMigrationStatements(t *testing.T) {
+	// 只校验分句和事务包装过滤；引号中的分号不能被切成另一条 SQL。
 	sqlText := `
 -- keep comment
 SET NAMES utf8mb4;

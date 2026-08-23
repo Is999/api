@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""按字符串与调用上下文发现 Redis 线索；命中项必须沿真实调用链复核。"""
+
 import argparse
 import os
 import re
@@ -38,6 +40,7 @@ LUA_SCAN_COMMANDS = {"KEYS", "SCAN", "HSCAN", "SSCAN", "ZSCAN"}
 
 
 def is_allowed(path: str) -> bool:
+    """只按完整目录段识别集中 Key 包，避免同名前缀误获豁免。"""
     parts = tuple(part for part in os.path.normpath(path).split(os.sep) if part not in ("", "."))
     return any(
         parts[index : index + len(allowed)] == allowed
@@ -47,6 +50,7 @@ def is_allowed(path: str) -> bool:
 
 
 def should_scan_line(line: str) -> bool:
+    """先移除字符串干扰，再判断赋值或 Redis 调用上下文。"""
     code = STRING_RE.sub('""', line)
     if KEY_ASSIGNMENT_RE.search(code):
         return True
@@ -56,13 +60,14 @@ def should_scan_line(line: str) -> bool:
 
 
 def looks_like_key_literal(literal: str) -> bool:
+    """冒号或带业务字符的通配符仅作为线索，不据此认定违规 Key。"""
     if ":" in literal:
         return True
     return "*" in literal and bool(re.search(r"[A-Za-z0-9_:-]", literal))
 
 
 def string_literals(line: str):
-    """Extract Go and Lua string literals without returning duplicates."""
+    """提取 Go 与 Lua 引号字符串，Lua 匹配不重复追加已识别的字面量。"""
     literals = [literal for _, literal in STRING_RE.findall(line)]
     for _, literal in LUA_STRING_RE.findall(line):
         if literal not in literals:
@@ -71,6 +76,7 @@ def string_literals(line: str):
 
 
 def walk_files(root: str, include_tests: bool = False):
+    """默认只扫生产 Go/Lua，测试夹具必须显式纳入。"""
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
         for name in filenames:
@@ -81,10 +87,12 @@ def walk_files(root: str, include_tests: bool = False):
 
 
 def scan_file(path: str):
+    """集中 Key 包仍检查通配扫描；读文件失败也作为审查项返回。"""
     findings = []
     allowed = is_allowed(path)
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            # 逐行线索不追踪跨行调用、变量别名或拼接后的实际 Key。
             for lineno, line in enumerate(handle, 1):
                 stripped = line.strip()
                 if not stripped or stripped.startswith(("//", "--")):
@@ -105,12 +113,18 @@ def scan_file(path: str):
     return findings
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    """默认用非零退出码提示人工复核；建议模式保留输出但不阻断。"""
     parser = argparse.ArgumentParser(description="Advisory Redis key governance scan.")
     parser.add_argument("root", nargs="?", default=".")
     parser.add_argument("--advisory-exit-zero", action="store_true")
     parser.add_argument("--include-tests", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    # 路径拼错或误传文件必须失败，不能把未扫描当成零命中。
+    if not os.path.isdir(args.root):
+        print(f"not a directory: {args.root}", file=sys.stderr)
+        return 2
 
     findings = []
     for path in walk_files(args.root, include_tests=args.include_tests):

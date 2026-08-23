@@ -9,7 +9,6 @@ import (
 	i18n "api/common/i18n"
 	keys "api/common/rediskeys"
 	"api/common/runtimecfg"
-	"api/helper"
 	"api/internal/infra/loggerx"
 	"api/internal/requestctx"
 	"api/internal/svc"
@@ -32,6 +31,7 @@ func NewBaseLogicWithContext(ctx context.Context, svcCtx *svc.ServiceContext) *B
 	ctx = loggerx.BindContext(ctx)
 	var scopedSvc *svc.ServiceContext
 	if svcCtx != nil {
+		// 请求只克隆上下文视图，数据库连接池和 Redis 客户端仍由进程共享。
 		scopedSvc = svcCtx.ScopedWithContext(ctx)
 	}
 	return &BaseLogic{
@@ -54,7 +54,7 @@ func (l *BaseLogic) AppID() string {
 	if l == nil || l.Svc == nil {
 		return ""
 	}
-	return strings.TrimSpace(l.Svc.CurrentConfig().AppID)
+	return l.Svc.CurrentConfig().AppID
 }
 
 // AppRedisKey 给业务 Redis key 追加当前 app_id 命名空间。
@@ -63,6 +63,7 @@ func (l *BaseLogic) AppRedisKey(key string) string {
 		return ""
 	}
 	appID := l.AppID()
+	// 请求持有的服务配置必须与全局 key 前缀一致，不能把旧上下文写入另一站点。
 	if appID == "" || appID != runtimecfg.AppID() {
 		return ""
 	}
@@ -103,11 +104,11 @@ func (l *BaseLogic) AccessToken() string {
 	return ""
 }
 
-// GetCtxUser 返回当前请求上下文中的前台用户信息。
-func (l *BaseLogic) GetCtxUser() *helper.CtxUser {
-	user := helper.GetCtxUser(l.Ctx)
+// GetCtxUser 返回鉴权写入的用户信息；缺失时返回 ID 为零的对象，不返回 nil。
+func (l *BaseLogic) GetCtxUser() *requestctx.User {
+	user := requestctx.UserFromContext(l.Ctx)
 	if user == nil {
-		return &helper.CtxUser{}
+		return &requestctx.User{}
 	}
 	return user
 }
@@ -137,6 +138,11 @@ func (l *BaseLogic) RdsSetJSONValue(key string, value any, expireSec int64) erro
 	if key == "" {
 		return errors.New("Redis key 为空")
 	}
+	// JitterTTL 最多增加 10%，因此上限需为 duration 最大值预留抖动空间。
+	const maxJitterTTLSeconds = int64(((1<<63 - 1) / 11 * 10) / int64(time.Second))
+	if expireSec <= 0 || expireSec > maxJitterTTLSeconds {
+		return errors.Errorf("Redis JSON 缓存 TTL 必须在 1-%d 秒之间", maxJitterTTLSeconds)
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return errors.Tag(err)
@@ -154,19 +160,18 @@ func (l *BaseLogic) RdsDelKeys(keys ...string) error {
 		return errors.New("Redis 未初始化")
 	}
 	normalized := make([]string, 0, len(keys))
+	// 先校验全部键再发送删除，避免参数后半段非法时前半段已产生副作用。
 	for _, key := range keys {
 		key = l.AppRedisKey(key)
 		if key == "" {
-			continue
+			return errors.New("Redis key 为空或不是规范逻辑 key")
 		}
 		normalized = append(normalized, key)
-	}
-	if len(normalized) == 0 {
-		return errors.New("Redis key 为空")
 	}
 	if len(normalized) == 1 {
 		return errors.Tag(l.Svc.Rds.Del(l.Ctx, normalized[0]).Err())
 	}
+	// 分节点流水线不是事务，执行失败时可能已有部分键删除，调用方可按原键集重试。
 	pipe := l.Svc.Rds.Pipeline()
 	for _, key := range normalized {
 		pipe.Del(l.Ctx, key)
@@ -190,7 +195,7 @@ func WrapLogicError(err error, format string, args ...any) error {
 	return errors.Wrap(err, format)
 }
 
-// FormatDateTime 将时间格式化为前端稳定展示字符串。
+// FormatDateTime 按时间值自身时区输出年月日时分秒，零时间返回空字符串。
 func FormatDateTime(t time.Time) string {
 	if t.IsZero() {
 		return ""

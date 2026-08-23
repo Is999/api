@@ -1,4 +1,4 @@
 interface:
   display_name: "实现闭环复核"
-  short_description: "沿真实生产入口检查需求、调用链、同步面、协议边界、验证快照与半成品风险。"
-  default_prompt: "使用 $implementation-closure-review 逐需求核对生产入口、最终副作用、失败终态、触发同步面和最后验证快照。"
+  short_description: "复核真实入口、最终副作用、失败终态、验证证据及初级开发者维护路径。"
+  default_prompt: "使用 $implementation-closure-review 按实际变更验收专业实现、初级开发者可理解的需求与回归入口、轻量事务和一个逻辑点一条就近短说明；规则修改只核对事实、引用与执行决策。"

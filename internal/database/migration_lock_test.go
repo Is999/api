@@ -26,6 +26,7 @@ func TestMigrationLockSQLAssetsHaveHeaders(t *testing.T) {
 
 // TestMigrationLockRejectsSingleConnectionPoolUnit 确保单连接配置在访问数据库前快速失败。
 func TestMigrationLockRejectsSingleConnectionPoolUnit(t *testing.T) {
+	// 零值连接池没有驱动，容量检查必须在获取连接前拒绝。
 	db := &sql.DB{}
 	db.SetMaxOpenConns(1)
 	called := false

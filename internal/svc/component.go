@@ -33,9 +33,8 @@ func NewComponentRegistry(items ...Component) (*ComponentRegistry, error) {
 	registry := &ComponentRegistry{}
 	seen := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		item.Name = strings.TrimSpace(item.Name)
-		if item.Name == "" {
-			return nil, errors.Errorf("组件注册表存在空名称")
+		if item.Name == "" || item.Name != strings.TrimSpace(item.Name) {
+			return nil, errors.Errorf("组件注册表存在空名称或名称包含首尾空白")
 		}
 		if _, ok := seen[item.Name]; ok {
 			return nil, errors.Errorf("组件注册表存在重复名称: %s", item.Name)
@@ -70,6 +69,7 @@ func (r *ComponentRegistry) Close(ctx context.Context) error {
 		if closeFunc == nil {
 			continue
 		}
+		// 单个组件失败不阻断其前置依赖关闭，最后向主入口返回首个错误。
 		if err := closeFunc(ctx); err != nil && firstErr == nil {
 			firstErr = errors.Tag(err)
 		}

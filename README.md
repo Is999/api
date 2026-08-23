@@ -26,7 +26,7 @@ API 负责前台请求热路径：
 
 - 用户注册、登录、刷新和退出。
 - JWT 与 Redis session 生命周期、会话上限和即时撤销。
-- 用户资料读取与修改，以及多种身份索引定位。
+- 用户资料读取，以及多种身份索引定位。
 - 请求参数校验、统一业务码和中英文消息。
 - 可选签名验签、字段级加解密和请求防重放。
 - 运行期系统配置读取与受控热加载。
@@ -53,7 +53,7 @@ API 不承载管理员后台、任务队列、Scheduler、运营工作流或大�
 | `table-sharding/shardingsphere-proxy-alternative` | ShardingSphere-Proxy 候选方案 | 应用访问逻辑表；Proxy 负责物理路由，部署和回填工具由 Admin 同名分支维护 |
 | `table-sharding/app-table-sharding` | 应用内固定桶分表候选方案 | API 计算物理表名；在线复制和切换由 Admin 同名分支执行 |
 
-Proxy 分支相对 `main` 只允许方案文档差异；应用分表分支只允许物理表路由、身份定位和对应文档差异。合并后执行下列命令，退出码必须为 `0`，报告中不得出现允许清单之外的代码、配置、SQL 或接口差异：
+Proxy 分支相对 `main` 只允许 `README.md` 差异；应用分表分支只允许 `README.md` 和 `docs/` 下的文档差异。后续确需引入方案代码差异时，必须同步维护漂移检查脚本的允许清单。合并后执行下列命令，退出码必须为 `0`，报告中不得出现允许清单之外的代码、配置、SQL 或接口差异：
 
 ```bash
 make branch-drift-check
@@ -68,11 +68,12 @@ cmd/api
   -> bootstrap.LoadConfig / bootstrap.Wire
   -> 初始化日志、Trace、MySQL、Redis、Collector 和 ServiceContext
   -> 从 RouteSpecs 注册公开与内网路由
+  -> handler 装配 middleware 所需的用户、风控和密钥窄接口
   -> middleware 执行恢复、链路、访问日志、鉴权和安全策略
   -> handler 解析请求并触发 Validate
   -> logic 编排业务规则和事务
   -> model / cache / infra 访问数据库、Redis 和外部依赖
-  -> helper.JSONResp 输出统一响应
+  -> internal/httpresp 输出统一响应
 ```
 
 HTTP 响应统一为：
@@ -101,12 +102,15 @@ HTTP 响应统一为：
 | `etc` | 标准样例、dnmp 样例和本地运行配置 |
 | `internal/bootstrap` | 配置加载、组件装配、热加载和生命周期 |
 | `internal/handler` | 路由规格、参数解析、安全链路和响应写出 |
+| `internal/httpresp` | HTTP 统一响应与链路字段写出，只服务请求边界 |
 | `internal/logic` | 用例编排、规则校验、事务和缓存边界 |
 | `internal/model` | GORM Model、身份索引、表定位和数据访问 |
 | `internal/middleware` | 鉴权、签名、加解密、内网 Ops、日志和恢复 |
 | `internal/security` | 路由字段级签名、加密和大小限制契约 |
 | `internal/infra` | MySQL、Redis、日志、Trace 和 Collector 适配 |
 | `internal/types` | 请求、响应、列表项和参数校验契约 |
+
+项目只采用 go-zero 的 REST、日志和进程基础能力；路由规格、依赖装配、安全中间件和运行组件由本项目统一实现，不引入第二套 `ServiceContext` 或 goctl 生成目录。`common`、`helper` 不得 import `internal/*`，`internal/types` 不读取请求上下文，`internal/middleware` 通过 `Runtime` 窄接口访问业务能力；`internal/architecture` 的依赖测试负责阻止边界回退。
 
 ## 统一注册点
 
@@ -135,7 +139,7 @@ JWT 携带稳定 `sid`、唯一 `jti` 和 `auth_version`。会话通过同槽 Re
 
 ### 路由安全
 
-`security.secret_key` 配置后启用 `X-App-Id`、`X-Signature`、`X-Crypto`、`X-Cipher` 和 `X-Key-Version` 等安全头。签名与加密字段必须由路由安全策略逐字段声明；不得默认处理完整请求体、大对象或分页列表。
+`security.secret_key` 配置后启用 `X-App-Id`、`X-Signature`、`X-Crypto`、`X-Cipher` 和 `X-Key-Version` 等安全头。签名只接受 `H`（HMAC-SHA256）或 `R`（RSA-SHA256），加密只接受 `A`（AES-256-GCM）或 `R`（RSA-OAEP-SHA256）；开启加密必须同时开启签名。请求固定先验签密文再解密，响应固定先加密再回签；字段必须由路由策略逐项声明，不得处理整包或大结构。服务在监听前读取并预编译全部版本的 AES/RSA 材料，请求链只查找不可变注册表；密钥引用文件内容变更后必须重启。
 
 ### 内网接口
 
@@ -154,17 +158,21 @@ cp etc/config.dnmp.sample.yaml etc/config.yaml
 go mod download
 ```
 
-修改本地配置中的数据库、Redis、`app_id`、`jwt_secret`、安全密钥和运维令牌。不要把真实生产密钥写入样例文件。
+修改本地配置中的数据库、Redis、`app_id`、必填的持久数据根密钥 `app_key`、`jwt_secret`、安全密钥和运维令牌。不要把真实生产密钥写入样例文件。
 
-### 2. 初始化本地空库
+### 2. 初始化或补齐本地数据库
 
 ```bash
 make migrate-status MIGRATE_CONFIG=./etc/config.yaml
 make migrate-dry-run MIGRATE_CONFIG=./etc/config.yaml
-make migrate-up MIGRATE_CONFIG=./etc/config.yaml
+make migrate-bootstrap MIGRATE_CONFIG=./etc/config.yaml
 ```
 
-以上命令只用于确认无业务数据的全新空库。仓库内 DDL/DML 是完整初始化基线，不负责升级已有数据库；存量库变化由开发在被忽略的 `data/sql-changes/<change-id>/` 生成本地增量 SQL，通过发布工单交给 DBA/运维命令行执行，SQL 文件不提交仓库、不追加迁移版本。完整边界见[数据库初始化与变更交付治理](docs/site/角色文档/运维/数据库迁移治理.md)。
+迁移命令默认使用 `MIGRATE_TIMEOUT=15m` 限制带 context 的连接、锁等待和 SQL，可按初始化资产规模调整，但不得超过 `2h`；同步配置读取和连接关闭不受该 context 强制中断。
+
+Admin/API 两套迁移工具可以管理同一主库：API 只登记 `api_schema_migrations`，Admin 只登记 `admin_schema_migrations`，各自版本和名称唯一约束独立；两套工具共用 `app:schema-migration` 命名锁。共享库须分别完成两套初始化清单，先后顺序不限；Admin 用户管理所需 `user` 和四张 `user_identity_*` 表由 API 清单创建。工具不读取或自动搬迁通用 `schema_migrations`，应用启动不检查迁移登记。
+
+以上命令支持新库初始化、非空库执行未登记的幂等资产和部分登记续跑；已登记且名称、资产与 checksum 一致的项跳过，冲突时拒绝执行。它不会修改已有表的列或索引，也不会覆盖已有 seed；结构升级和数据修复仍由开发在被忽略的 `data/sql-changes/<change-id>/` 生成增量 SQL，交给 DBA/运维执行，文件不提交仓库、不追加迁移版本。执行前后检查与失败处置见[数据库初始化与变更交付治理](docs/site/角色文档/运维/数据库迁移治理.md)。
 
 ### 3. 启动服务
 
@@ -187,7 +195,7 @@ go run ./cmd/migrate -version
 
 项目自有 YAML 样例中的每个固定配置字段必须保留紧邻字段上方、与字段同缩进的中文注释。注释至少写明消费组件和用途，并如实补充源码已定义的取值/单位、缺省与空值、热加载或重启、敏感信息及跨字段约束；父节点概述不能替代子字段说明。动态 map 的重复数据项由父字段统一定义 key/value、空值和合并语义，第三方 schema 与纯数据文件按 [AI 开发规范](docs/site/角色文档/后端开发/AI开发规范.md#yaml-配置字段行级注释)记录排除依据。
 
-`config_files.runtime` 只允许外置 `internal/bootstrap/configload/runtimefile:sectionSpecs` 声明的运行期配置段。认证限流、热加载轮询等字段只有在已有应用器支持时才能热更新；HTTP、AppID/AppKey、JWT、Security、Collector、MySQL、Redis、OTLP、路由和组件注册等启动期能力变更后必须重启。
+`config_files.runtime` 只允许外置 `internal/bootstrap/configload/runtimefile:sectionSpecs` 声明的运行期配置段，未知、重复或带首尾空白的顶层段会拒绝加载。认证限流、热加载轮询等字段只有在已有应用器支持时才能热更新；HTTP、AppID/AppKey、JWT、Security、Collector、MySQL、Redis、OTLP、路由和组件注册等启动期能力变更后必须重启。
 
 ## 开发与验证
 
@@ -210,6 +218,10 @@ make ci
 
 `make ci` 包含格式、全量测试、race、vet、构建、密钥扫描、依赖漏洞检查、Prometheus 规则、分支差异和 diff 检查。缺少 `promtool` 时会尝试使用 Docker 镜像。
 
+数据库迁移和锁链路使用 `make integration-test` 启动本地隔离 MySQL；GitLab CI 的 `integration` Job 使用 MySQL service 调用 `make integration-test-run`，避免只靠 SQLite 或 mock 证明生产数据库行为。
+
+集成环境默认库为 `api_test`。覆盖 `INTEGRATION_MYSQL_DSN` 时必须使用以 `_test` 结尾的独占库，禁止连接业务库或与其它测试进程共用；迁移夹具发现目标表已存在会直接失败，不删除已有表。正常清理只回收本用例创建的表。旧本地 Compose 实例不会因修改 `MYSQL_DATABASE` 自动补建新库，应先核对实例归属，再由开发者在该隔离实例准备空的 `api_test`。
+
 开发时遵守以下分层：
 
 - Handler 只负责路由、参数、安全上下文和响应；业务流程进入 Logic。
@@ -223,12 +235,12 @@ make ci
 
 - 存活探针：`/api/live`，不访问外部依赖。
 - 就绪探针：`/api/ready`，检查启用的关键依赖和组件。
-- Prometheus 指标：`/api/metrics`。
+- Prometheus 指标：`/api/metrics`，只注册在独立内网监听器且不要求应用层 token。
 
 以下条目必须保留命令输出、接口响应、认证记录或发布工单作为证据，不能只填写“正常”或“已确认”：
 
-- 新空库已按 `migrate-status -> migrate-dry-run -> migrate-up` 顺序初始化且进程退出码为 `0`；已有环境的 DBA/运维工单已记录 SQL SHA-256、执行顺序、影响行数和 `90_verify.sql` 或等价校验结果。候选版本中不存在一次性增量 SQL。
-- `/api/live` 返回 HTTP 2xx 且不依赖外部服务；`/api/ready` 返回 HTTP 2xx，并且响应中所有已启用关键依赖与组件均为就绪；`/api/metrics` 可被目标 Prometheus 抓取。
+- 初始化或补齐未登记资产时，按 `migrate-status -> migrate-dry-run -> migrate-bootstrap` 执行并记录退出码及真实结构/数据校验；修改已有结构或数据时，DBA/运维工单记录 SQL SHA-256、执行顺序、影响行数和 `90_verify.sql` 或等价结果。候选版本中不存在一次性增量 SQL。
+- 公网监听器上的 `/api/live` 返回 HTTP 2xx 且不依赖外部服务；`/api/ready` 返回 HTTP 2xx，并且响应中所有已启用关键依赖与组件均为就绪；公网监听器访问 `/api/metrics` 返回 404，目标 Prometheus 只能从内网监听器抓取。
 - 认证冒烟覆盖登录、刷新和退出：刷新后旧 token 不能再次刷新，退出后目标 session 失效，用户会话数不超过服务端上限。启用签名或加密时，再覆盖合法安全头、错误签名、重放 nonce、字段超限和细分业务码。
 - MySQL、Redis、Collector 和 Trace 的实际连接目标与发布环境清单一致；通过脱敏诊断、就绪检查或受控请求验证，禁止在交付记录中输出密码、token、私钥或完整 DSN。
 - Admin 到 API 的内网运行态同步和文档代理分别完成一次受控调用，验证私网来源、Ops HMAC、时间窗口、nonce 防重放及失败响应；浏览器不能绕过 Admin 直接访问 API 内网文档资源。
@@ -238,4 +250,4 @@ make ci
 
 ## License
 
-Internal use only.
+许可条款见 [LICENSE](LICENSE)。

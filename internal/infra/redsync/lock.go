@@ -20,6 +20,8 @@ var (
 	ErrLockLost = errors.New("Redis 锁已丢失")
 	// ErrLockTaken 表示 Redis 锁已被其它任务持有，调用方可按业务语义选择跳过本次触发。
 	ErrLockTaken = errors.New("Redis 锁已被占用")
+	// ErrLockUnavailable 表示 Redis 锁基础设施无法完成获取、续期或释放，调用方应按依赖不可用处理。
+	ErrLockUnavailable = errors.New("Redis 锁不可用")
 )
 
 const (
@@ -57,14 +59,14 @@ type Lock struct {
 
 // NewLock 基于传入的 Redis 客户端创建分布式锁实例。
 func NewLock(redisClient redis.UniversalClient, key string) *Lock {
-	// lock 保存一次分布式锁生命周期所需的固定配置和内部状态。
+	// 通知通道按一次持锁周期创建，同一实例不用于重新抢锁。
 	lock := &Lock{
-		key:  strings.TrimSpace(key),
+		key:  key,
 		done: make(chan struct{}),
 		lost: make(chan error, 1),
 	}
 	if redisClient != nil {
-		// pool 将 go-redis 客户端适配为 redsync 可使用的 Redis 连接池。
+		// 适配器复用调用方连接池，锁释放不负责关闭 Redis 客户端。
 		pool := goredis.NewPool(redisClient)
 		lock.rs = redsyncv4.New(pool)
 	}
@@ -80,10 +82,10 @@ func (l *Lock) TryLock(ctx context.Context, ttl time.Duration) error {
 func (l *Lock) tryLock(ctx context.Context, ttl time.Duration, singleAttempt bool) error {
 	// 基础参数先校验，避免 nil Redis 客户端或非法 TTL 在 redsync 内部触发 panic 或异常行为。
 	if l == nil || l.rs == nil {
-		return errors.Errorf("Redis 锁未初始化")
+		return errors.Join(ErrLockUnavailable, errors.Errorf("Redis 锁未初始化"))
 	}
-	if l.key == "" {
-		return errors.Errorf("Redis 锁 key 不能为空")
+	if l.key == "" || l.key != strings.TrimSpace(l.key) {
+		return errors.Errorf("Redis 锁 key 不能为空或包含首尾空白")
 	}
 	if ttl <= 0 {
 		return errors.Errorf("Redis 锁 TTL 必须大于 0")
@@ -96,12 +98,12 @@ func (l *Lock) tryLock(ctx context.Context, ttl time.Duration, singleAttempt boo
 	l.ttl = ttl
 	l.cancel = cancel
 
-	// mutex 是当前锁生命周期真正执行 Redis SETNX/PEXPIRE/DEL 等操作的底层互斥锁。
+	// owner 由 redsync 的密码学随机源生成，此处只配置竞争重试策略。
 	l.mutex = l.rs.NewMutex(l.key,
 		redsyncv4.WithExpiry(ttl),
 		redsyncv4.WithTries(lockAcquireTries),
 		redsyncv4.WithRetryDelayFunc(func(tries int) time.Duration {
-			// jitter 使用进程级并发安全随机源，让同一时刻失败的多个竞争者分散重试。
+			// 非安全随机数只用于重试抖动，不参与锁的 owner 生成。
 			jitter := time.Duration(rand.Int64N(int64(maxLockRetryJitter) + 1))
 			return lockRetryDelay(tries, jitter)
 		}),
@@ -120,17 +122,16 @@ func (l *Lock) tryLock(ctx context.Context, ttl time.Duration, singleAttempt boo
 	} else {
 		lockErr = l.mutex.LockContext(acquireCtx)
 	}
-	acquireErr := acquireCtx.Err()
 	acquireCancel()
 	if lockErr != nil {
 		cancel()
-		if acquireErr != nil {
-			return errors.Wrap(acquireErr, "获取 Redis 锁失败")
+		if parentErr := ctx.Err(); parentErr != nil {
+			return errors.Wrap(parentErr, "获取 Redis 锁失败")
 		}
 		if isLockTakenError(lockErr) {
 			return stderrors.Join(errors.Wrap(lockErr, "获取 Redis 锁失败"), ErrLockTaken)
 		}
-		return errors.Wrap(lockErr, "获取 Redis 锁失败")
+		return errors.Join(ErrLockUnavailable, errors.Wrap(lockErr, "获取 Redis 锁失败"))
 	}
 
 	// 加锁成功后再启动续期，避免未持锁时出现无意义的续期 goroutine。
@@ -180,7 +181,7 @@ func (l *Lock) startRenewal(ttl time.Duration) {
 	if interval <= 0 {
 		interval = ttl
 	}
-	// ticker 驱动后台续期循环；函数退出时必须停止，避免定时器资源泄漏。
+	// 续期只服务本次持锁周期，退出时停止后续 tick。
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -208,7 +209,7 @@ func (l *Lock) startRenewal(ttl time.Duration) {
 			if !ok || err != nil {
 				// 续期失败属于锁安全边界被打破，必须优先通知业务层取消受保护逻辑。
 				if err != nil {
-					l.reportLoss(errors.Wrap(err, "续期 Redis 锁失败"))
+					l.reportLoss(errors.Join(ErrLockUnavailable, errors.Wrap(err, "续期 Redis 锁失败")))
 				} else {
 					l.reportLoss(ErrLockLost)
 				}
@@ -248,10 +249,16 @@ func (l *Lock) Unlock() error {
 	unlockCtx, cancel := context.WithTimeout(context.Background(), lockOperationTimeout(l.ttl))
 	defer cancel()
 	if ok, err := l.mutex.UnlockContext(unlockCtx); !ok || err != nil {
-		if err != nil {
-			return errors.Wrap(err, "释放 Redis 锁失败")
+		if errors.Is(err, redsyncv4.ErrLockAlreadyExpired) || (err == nil && !ok) {
+			if err != nil {
+				return errors.Join(ErrLockLost, errors.Wrap(err, "释放 Redis 锁失败"))
+			}
+			return errors.Join(ErrLockLost, errors.Errorf("释放 Redis 锁失败: owner 已不再持有锁"))
 		}
-		return errors.Errorf("释放 Redis 锁失败")
+		if err != nil {
+			return errors.Join(ErrLockUnavailable, errors.Wrap(err, "释放 Redis 锁失败"))
+		}
+		return errors.Join(ErrLockUnavailable, errors.Errorf("释放 Redis 锁失败"))
 	}
 	return nil
 }
@@ -377,7 +384,7 @@ func withLock(ctx context.Context, redisClient redis.UniversalClient, key string
 	}()
 
 	if fn != nil {
-		// fn 接收 runCtx；如果续期失败，runCtx 会被取消，业务逻辑可以据此尽快退出。
+		// 回调必须把派生上下文传给下游；取消通知不能强制中止已开始的外部写入。
 		err = fn(runCtx)
 	}
 	return err

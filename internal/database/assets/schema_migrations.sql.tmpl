@@ -1,14 +1,14 @@
 -- 代码资产：创建数据库迁移版本表。
 -- SQL 方言：MySQL 8.0 InnoDB。
 -- 调用方：internal/database.SchemaMigrationsSQL 通过 go:embed 加载，并先剥离本说明再返回可执行 SQL。
--- 参数来源：无动态参数；DDL 固定创建 schema_migrations 表。
--- 安全边界：仅记录已执行迁移版本，不承载业务数据。
-CREATE TABLE IF NOT EXISTS `schema_migrations` (
+-- 参数来源：无动态参数；DDL 固定创建 api_schema_migrations 表。
+-- 安全边界：仅记录 API 已执行初始化版本，不承载业务数据或 Admin 登记。
+CREATE TABLE IF NOT EXISTS `api_schema_migrations` (
   `version` varchar(32) NOT NULL COMMENT '迁移版本号',
   `name` varchar(128) NOT NULL DEFAULT '' COMMENT '迁移名称',
   `asset` varchar(255) NOT NULL DEFAULT '' COMMENT '迁移资产路径',
   `checksum` char(64) NOT NULL DEFAULT '' COMMENT '迁移SQL SHA256',
   `applied_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '执行时间',
   PRIMARY KEY (`version`),
-  UNIQUE KEY `uk_schema_migrations_name` (`name`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='数据库迁移版本表';
+  UNIQUE KEY `uk_api_schema_migrations_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='API数据库迁移版本表';

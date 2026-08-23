@@ -3,6 +3,8 @@ package middleware
 import (
 	"bytes"
 	"net/http"
+
+	"github.com/Is999/go-utils/errors"
 )
 
 // bodyRecorder 捕获下游响应头、状态码和响应体，供签名/加密中间件二次处理。
@@ -48,6 +50,31 @@ func newBodyRecorder() *bodyRecorder {
 	}
 }
 
+// parseSecurityResponseData 校验需要签名或加密的成功响应，业务失败响应不再二次加工。
+func parseSecurityResponseData(recorder *bodyRecorder, scope string) (map[string]any, map[string]any, bool, error) {
+	if recorder == nil {
+		return nil, nil, false, errors.Errorf("%s响应为空", scope)
+	}
+	// 复用无损数字解析，安全字段改写不得舍入响应中的其它业务数值。
+	envelope, err := decodeSingleJSONMap(recorder.body.Bytes())
+	if err != nil {
+		return nil, nil, false, errors.Wrapf(err, "%s响应不是合法JSON", scope)
+	}
+	status, ok := envelope["status"].(bool)
+	if !ok {
+		return nil, nil, false, errors.Errorf("%s响应缺少布尔字段status", scope)
+	}
+	if !status {
+		// 业务失败没有成功数据契约，不应再因缺少敏感字段产生第二个错误。
+		return envelope, nil, false, nil
+	}
+	data, ok := envelope["data"].(map[string]any)
+	if !ok || data == nil {
+		return nil, nil, false, errors.Errorf("%s成功响应data必须是对象", scope)
+	}
+	return envelope, data, true, nil
+}
+
 // Header 返回可写响应头集合。
 func (r *bodyRecorder) Header() http.Header {
 	return r.header
@@ -55,6 +82,7 @@ func (r *bodyRecorder) Header() http.Header {
 
 // WriteHeader 记录 HTTP 状态码。
 func (r *bodyRecorder) WriteHeader(status int) {
+	// 首次状态已经确定响应结果，后续 Write 不得将失败码覆盖成 200。
 	if r.wroteHeader {
 		return
 	}

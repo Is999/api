@@ -1,6 +1,7 @@
 package localcache
 
 import (
+	"math"
 	"sync"
 	"time"
 
@@ -18,16 +19,18 @@ const (
 	defaultBufferItems int64 = 64
 	// defaultItemCost 表示单个缓存项的默认成本。
 	defaultItemCost int64 = 1
+	// maxTTLTickerSeconds 是秒数换算为 Duration 时不会溢出的上限。
+	maxTTLTickerSeconds = math.MaxInt64 / int64(time.Second)
 )
 
 // Options 定义本地缓存初始化参数。
 type Options struct {
 	NumCounters              int64         // 频次计数器数量，<=0 时使用默认值
-	MaxCost                  int64         // 最大成本，<=0 时使用默认值
+	MaxCost                  int64         // 总成本上限，单位与 ItemCost 一致；默认成本不是对象字节数
 	BufferItems              int64         // Get 缓冲大小，<=0 时使用默认值
 	ItemCost                 int64         // 单项默认成本，<=0 时使用 1
 	TTL                      time.Duration // 默认 TTL，<=0 表示不过期
-	TTLTickerDurationSeconds int64         // TTL 清理间隔秒数，<=0 时使用 Ristretto 默认值
+	TTLTickerDurationSeconds int64         // TTL 清理间隔秒数，<=0 时使用 Ristretto 默认值，正值不得超过 maxTTLTickerSeconds
 	Metrics                  bool          // 是否采集指标
 	IgnoreInternalCost       bool          // 是否忽略 Ristretto 内部存储成本
 }
@@ -58,6 +61,10 @@ type Cache[K ristretto.Key, V any] struct {
 
 // New 创建本地缓存实例。
 func New[K ristretto.Key, V any](options Options) (*Cache[K, V], error) {
+	// 先限制原始秒数，避免依赖换算溢出后在创建 ticker 时 panic。
+	if options.TTLTickerDurationSeconds > maxTTLTickerSeconds {
+		return nil, errors.Errorf("本地缓存 TTL 清理间隔不能超过 %d 秒", maxTTLTickerSeconds)
+	}
 	options = normalizeOptions(options)
 	cache, err := ristretto.NewCache(&ristretto.Config[K, V]{
 		NumCounters:            options.NumCounters,
@@ -109,6 +116,7 @@ func (c *Cache[K, V]) SetWithTTLAndCost(key K, value V, ttl time.Duration, cost 
 	if cost <= 0 {
 		cost = c.itemCost
 	}
+	// 接受入队不代表通过准入策略；读取方仍须处理未命中，不能把缓存当作权威存储。
 	return c.inner.SetWithTTL(key, value, cost, ttl)
 }
 
@@ -145,7 +153,7 @@ func (c *Cache[K, V]) Clear() {
 	c.inner.Clear()
 }
 
-// Wait 等待已入队写操作被应用。
+// Wait 等待已入队写操作完成处理，不保证被准入策略拒绝的值可读。
 func (c *Cache[K, V]) Wait() {
 	if c == nil || c.inner == nil {
 		return
@@ -159,6 +167,7 @@ func (c *Cache[K, V]) Close() {
 		return
 	}
 	c.closeOnce.Do(func() {
+		// 调用方可重复清理，Ristretto 的后台协程只关闭一次。
 		c.inner.Close()
 	})
 }
@@ -199,6 +208,7 @@ func normalizeOptions(options Options) Options {
 	if options.ItemCost <= 0 {
 		options.ItemCost = defaultItemCost
 	}
+	// 初始化的负 TTL 按未配置处理；逐次写入的负 TTL 则拒绝，避免误存永久数据。
 	if options.TTL < 0 {
 		options.TTL = 0
 	}

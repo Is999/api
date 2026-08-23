@@ -13,6 +13,7 @@ func Register[T prometheus.Collector](collector T) (T, error) {
 			var zero T
 			return zero, errors.Wrapf(err, "注册 Prometheus 指标失败 collector=%T", collector)
 		}
+		// 只能复用同类型实例，否则写指标时会落到未注册对象或发生错误断言。
 		existing, ok := duplicate.ExistingCollector.(T)
 		if !ok {
 			var zero T

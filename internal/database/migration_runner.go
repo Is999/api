@@ -19,7 +19,7 @@ const (
 	MigrationStatusBlocked = "blocked"
 )
 
-// AppliedMigration 表示 schema_migrations 中已登记的版本。
+// AppliedMigration 表示 API 独立登记表中的初始化版本，不包含其它工具的资产。
 type AppliedMigration struct {
 	Version  string // 迁移版本号
 	Name     string // 迁移名称
@@ -46,12 +46,15 @@ type MigrationRunItem struct {
 
 // MigrationStore 抽象迁移执行所需的数据库操作，便于命令行和测试复用。
 type MigrationStore interface {
+	// EnsureSchema 在实际执行迁移前确保版本表存在。
 	EnsureSchema(context.Context, string) error
+	// AppliedMigrations 读取已登记版本，版本表不存在时返回空集合。
 	AppliedMigrations(context.Context) (map[string]AppliedMigration, error)
+	// ExecuteMigration 顺序执行单个初始化资产并在成功后登记版本。
 	ExecuteMigration(context.Context, Migration) error
 }
 
-// RunMigrations 根据 schema_migrations 状态执行或预览迁移。
+// RunMigrations 按登记跳过已完成资产，允许在非空库补执行和重试未登记的幂等 SQL。
 func RunMigrations(ctx context.Context, store MigrationStore, migrations []Migration, options MigrationRunOptions) ([]MigrationRunItem, error) {
 	if store == nil {
 		return nil, errors.Errorf("数据库迁移 store 不能为空")
@@ -59,28 +62,39 @@ func RunMigrations(ctx context.Context, store MigrationStore, migrations []Migra
 	if err := validateMigrationList(migrations); err != nil {
 		return nil, errors.Tag(err)
 	}
-	if !options.DryRun {
-		if err := store.EnsureSchema(ctx, SchemaMigrationsSQL()); err != nil {
-			return nil, errors.Wrap(err, "初始化数据库迁移版本表失败")
-		}
-	}
 	applied, err := store.AppliedMigrations(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "读取数据库迁移版本表失败")
 	}
+	// 已登记元数据必须与当前完整基线一致。
+	if err = validateAppliedMigrations(migrations, applied); err != nil {
+		return nil, errors.Tag(err)
+	}
+	hasPending := false
+	for _, migration := range migrations {
+		if _, ok := applied[migration.Version]; !ok {
+			hasPending = true
+			break
+		}
+	}
+	if !options.DryRun && hasPending {
+		// 仅实际执行待办资产时创建登记表，预览和完整重跑不写数据库。
+		if err = store.EnsureSchema(ctx, SchemaMigrationsSQL()); err != nil {
+			return nil, errors.Wrap(err, "初始化数据库迁移版本表失败")
+		}
+	}
 
 	results := make([]MigrationRunItem, 0, len(migrations))
+	// 待执行资产严格按清单顺序处理。
 	for _, migration := range migrations {
 		item := newMigrationRunItem(migration)
-		if appliedItem, ok := applied[migration.Version]; ok {
-			if !sameChecksum(appliedItem.Checksum, migration.Checksum) {
-				return results, errors.Errorf("数据库迁移 checksum 不一致 version=%s name=%s applied=%s current=%s", migration.Version, migration.Name, appliedItem.Checksum, migration.Checksum)
-			}
+		if _, ok := applied[migration.Version]; ok {
 			item.Status = MigrationStatusApplied
 			results = append(results, item)
 			continue
 		}
 
+		// 预览列出所有被拦截项；实际执行遇到首个未授权资产即停止。
 		if reason := blockMigrationReason(migration, options); reason != "" {
 			item.Status = MigrationStatusBlocked
 			item.Reason = reason
@@ -102,6 +116,34 @@ func RunMigrations(ctx context.Context, store MigrationStore, migrations []Migra
 		results = append(results, item)
 	}
 	return results, nil
+}
+
+// validateAppliedMigrations 确保数据库登记只包含当前完整初始化资产且摘要未漂移。
+func validateAppliedMigrations(migrations []Migration, applied map[string]AppliedMigration) error {
+	current := make(map[string]Migration, len(migrations))
+	for _, migration := range migrations {
+		current[migration.Version] = migration
+	}
+	for version, appliedItem := range applied {
+		migration, ok := current[version]
+		if !ok {
+			return errors.Errorf("数据库存在当前初始化清单之外的登记 version=%s", version)
+		}
+		if appliedItem.Name != migration.Name || appliedItem.Asset != migration.Asset {
+			return errors.Errorf(
+				"数据库迁移登记与当前初始化资产不一致 version=%s applied_name=%s current_name=%s applied_asset=%s current_asset=%s",
+				migration.Version,
+				appliedItem.Name,
+				migration.Name,
+				appliedItem.Asset,
+				migration.Asset,
+			)
+		}
+		if appliedItem.Checksum != migration.Checksum {
+			return errors.Errorf("数据库迁移 checksum 不一致 version=%s name=%s applied=%s current=%s", migration.Version, migration.Name, appliedItem.Checksum, migration.Checksum)
+		}
+	}
+	return nil
 }
 
 // newMigrationRunItem 从迁移定义生成本轮执行结果的基础信息。
@@ -146,9 +188,6 @@ func validateMigrationList(migrations []Migration) error {
 		if previousVersion != "" && item.Version <= previousVersion {
 			return errors.Errorf("数据库迁移版本必须递增: %s <= %s", item.Version, previousVersion)
 		}
-		if item.BootstrapOnly && !item.Destructive {
-			return errors.Errorf("bootstrap-only 迁移必须同时标记 destructive: %s", item.Name)
-		}
 		if containsDestructiveSQL(item.SQL) && !item.Destructive {
 			return errors.Errorf("检测到破坏性 SQL 但迁移未标记 destructive: %s", item.Name)
 		}
@@ -157,11 +196,6 @@ func validateMigrationList(migrations []Migration) error {
 		previousVersion = item.Version
 	}
 	return nil
-}
-
-// sameChecksum 比较迁移 checksum，忽略大小写和首尾空白。
-func sameChecksum(left string, right string) bool {
-	return strings.EqualFold(strings.TrimSpace(left), strings.TrimSpace(right))
 }
 
 // containsDestructiveSQL 检测迁移 SQL 是否包含需显式放行的破坏性语句。

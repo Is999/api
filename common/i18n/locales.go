@@ -23,6 +23,7 @@ func NormalizeLocale(locale string) string {
 	if locale == "" {
 		return LocaleZHCN
 	}
+	// 先按浏览器 q 权重解析，再选首个受支持语种。
 	tags, _, err := language.ParseAcceptLanguage(locale)
 	if err != nil || len(tags) == 0 {
 		tag, parseErr := language.Parse(locale)
@@ -36,14 +37,12 @@ func NormalizeLocale(locale string) string {
 			return locale
 		}
 	}
+	// 请求只包含未维护语种时仍使用项目默认中文。
 	return LocaleZHCN
 }
 
-// supportedLocale 将标准语言标签映射到当前后端支持的语言。
+// supportedLocale 按基础语种选择资源，地区和书写系统变体共用当前文案。
 func supportedLocale(tag language.Tag) string {
-	if strings.EqualFold(tag.String(), LocaleENUS) {
-		return LocaleENUS
-	}
 	base, _ := tag.Base()
 	switch base.String() {
 	case "en":

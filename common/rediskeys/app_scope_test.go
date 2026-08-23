@@ -4,13 +4,13 @@ import (
 	"testing"
 )
 
-// TestWithPrefix 验证对应场景符合预期。
+// TestWithPrefix 确保只为规范逻辑 key 添加一次当前 AppID 前缀。
 func TestWithPrefix(t *testing.T) {
 	tests := []struct {
-		name  string // name 表示测试场景名称。
-		appID string // appID 表示测试应用 ID。
-		key   string // key 表示待验证 key。
-		want  string // want 表示期望结果。
+		name  string // 用于 t.Run 区分作用域边界
+		appID string // 决定当前 Redis 命名空间
+		key   string // 覆盖逻辑、当前作用域和外部作用域 key
+		want  string // 空值表示输入必须失败关闭
 	}{
 		{
 			name:  "scopes logical key",
@@ -19,10 +19,10 @@ func TestWithPrefix(t *testing.T) {
 			want:  "app:site-a:config_uuid:featureFlag",
 		},
 		{
-			name:  "keeps current app scoped key unchanged",
+			name:  "rejects current app scoped key",
 			appID: "site-a",
 			key:   "app:site-a:user:session:42:jti",
-			want:  "app:site-a:user:session:42:jti",
+			want:  "",
 		},
 		{
 			name:  "rejects other app scoped key",
@@ -31,10 +31,16 @@ func TestWithPrefix(t *testing.T) {
 			want:  "",
 		},
 		{
-			name:  "scopes incomplete app prefix as logical key",
+			name:  "rejects incomplete app prefix",
 			appID: "site-b",
 			key:   "app:site-a",
-			want:  "app:site-b:app:site-a",
+			want:  "",
+		},
+		{
+			name:  "rejects whitespace logical key",
+			appID: "site-a",
+			key:   " user:session:42:jti ",
+			want:  "",
 		},
 	}
 
@@ -48,12 +54,12 @@ func TestWithPrefix(t *testing.T) {
 	}
 }
 
-// TestHasPrefix 验证对应场景符合预期。
+// TestHasPrefix 确保仅完整作用域结构被识别为带前缀 key。
 func TestHasPrefix(t *testing.T) {
 	tests := []struct {
-		name string // name 表示测试场景名称。
-		key  string // key 表示待验证 key。
-		want bool   // want 表示期望结果。
+		name string // 用于 t.Run 区分前缀完整性边界
+		key  string // 覆盖完整、残缺和无作用域前缀
+		want bool   // 仅完整作用域 key 应命中
 	}{
 		{name: "scoped key", key: "app:site-a:user:session:42:jti", want: true},
 		{name: "empty logical key", key: "app:site-a:", want: false},
@@ -71,19 +77,21 @@ func TestHasPrefix(t *testing.T) {
 	}
 }
 
-// TestOwner 验证对应场景符合预期。
+// TestOwner 确保只从规范作用域 key 提取非空 AppID。
 func TestOwner(t *testing.T) {
 	tests := []struct {
-		name   string // name 表示测试场景名称。
-		key    string // key 表示待验证 key。
-		want   string // want 表示期望结果。
-		wantOK bool   // wantOK 表示期望是否成功。
+		name   string // 用于 t.Run 区分 AppID 提取边界
+		key    string // 覆盖规范、残缺和非法作用域 key
+		want   string // 保存规范 key 应提取的 AppID
+		wantOK bool   // 区分可解析作用域与非法输入
 	}{
 		{name: "scoped key", key: "app:site-a:user:session:42:jti", want: "site-a", wantOK: true},
 		{name: "empty logical key", key: "app:site-a:", want: "", wantOK: false},
 		{name: "missing logical separator", key: "app:site-a", want: "", wantOK: false},
 		{name: "missing app id", key: "app::user:session:42:jti", want: "", wantOK: false},
+		{name: "invalid app id", key: "app:site name:user:session:42:jti", want: "", wantOK: false},
 		{name: "logical key", key: "user:session:42:jti", want: "", wantOK: false},
+		{name: "whitespace scoped key", key: " app:site-a:user:session:42:jti ", want: "", wantOK: false},
 	}
 
 	for _, tt := range tests {
@@ -96,13 +104,13 @@ func TestOwner(t *testing.T) {
 	}
 }
 
-// TestIsForeignKey 验证对应场景符合预期。
+// TestIsForeignKey 确保仅其它 AppID 的完整作用域 key 被判定为外部 key。
 func TestIsForeignKey(t *testing.T) {
 	tests := []struct {
-		name  string // name 表示测试场景名称。
-		appID string // appID 表示测试应用 ID。
-		key   string // key 表示待验证 key。
-		want  bool   // want 表示期望结果。
+		name  string // 用于 t.Run 区分当前、外部和非法 key
+		appID string // 作为 Redis 命名空间比较基准
+		key   string // 覆盖当前、外部和残缺作用域
+		want  bool   // 仅完整外部作用域应为 true
 	}{
 		{name: "current app key", appID: "site-a", key: "app:site-a:user:session:42:jti", want: false},
 		{name: "other app key", appID: "site-a", key: "app:site-b:user:session:42:jti", want: true},
@@ -121,7 +129,7 @@ func TestIsForeignKey(t *testing.T) {
 	}
 }
 
-// TestWithPrefixWithEmptyAppIDFailsClosed 验证对应场景符合预期。
+// TestWithPrefixWithEmptyAppIDFailsClosed 确保缺少 AppID 时不生成或接受作用域前缀。
 func TestWithPrefixWithEmptyAppIDFailsClosed(t *testing.T) {
 	useAppID(t, "")
 	if got := Prefix(); got != "" {
@@ -135,12 +143,12 @@ func TestWithPrefixWithEmptyAppIDFailsClosed(t *testing.T) {
 	}
 }
 
-// TestTrimPrefix 验证对应场景符合预期。
+// TestTrimPrefix 确保只移除完整作用域前缀，普通或残缺 key 保持原值。
 func TestTrimPrefix(t *testing.T) {
 	tests := []struct {
-		name string // name 表示测试场景名称。
-		key  string // key 表示待验证 key。
-		want string // want 表示期望结果。
+		name string // 用于 t.Run 区分裁剪和原样保留分支
+		key  string // 覆盖当前作用域、普通和残缺 key
+		want string // 保存裁剪结果或应保留的原值
 	}{
 		{
 			name: "trims scoped key",

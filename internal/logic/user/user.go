@@ -10,6 +10,7 @@ import (
 	codes "api/common/codes"
 	i18n "api/common/i18n"
 	keys "api/common/rediskeys"
+	"api/internal/config"
 	redislock "api/internal/infra/redsync"
 	corelogic "api/internal/logic"
 	"api/internal/model"
@@ -96,7 +97,7 @@ func (l *UserLogic) getUserByID(db *gorm.DB, userID int64) (*model.User, error) 
 // Profile 返回当前用户资料。
 func (l *UserLogic) Profile() *types.BizResult {
 	ctxUser := l.GetCtxUser()
-	if ctxUser == nil || ctxUser.ID <= 0 {
+	if ctxUser.ID <= 0 {
 		return types.NewBizResult(codes.Unauthorized).
 			SetI18nMessage(i18n.MsgKeyUnauthorizedText).
 			WithError(errors.New("UserLogic.Profile 当前请求未登录"))
@@ -126,6 +127,7 @@ func (l *UserLogic) GetUserProfile(userID int64) (*types.UserProfile, error) {
 	if loadKey == "" {
 		loadKey = fmt.Sprintf(keys.UserProfile, userID)
 	}
+	// 同次回源使用首个调用方上下文，其取消错误会由本轮等待者共同接收。
 	value, err, _ := userProfileLoadGroup.Do(loadKey, func() (any, error) {
 		return l.loadUserProfile(cacheKey, userID)
 	})
@@ -148,6 +150,7 @@ func (l *UserLogic) loadUserProfile(cacheKey string, userID int64) (*types.UserP
 	// 缓存重建只抢锁一次；竞争失败后观察现有持有者的写回，避免锁重试和缓存轮询同时放大 Redis 往返。
 	err := redislock.WithLockOnce(l.Ctx, l.Redis(), l.userProfileRebuildLockKey(userID), userProfileRebuildLockTTL, func(lockCtx context.Context) error {
 		lockedLogic := NewUserLogic(lockCtx, l.Svc)
+		// 抢锁前可能已有实例写回，锁内二次读取用于避免重复查询数据库。
 		cached, found, err := lockedLogic.cachedUserProfile(cacheKey, userID)
 		if err != nil || found {
 			profile = cached
@@ -170,20 +173,19 @@ func (l *UserLogic) loadUserProfileFromDB(userID int64) (*types.UserProfile, err
 	user, err := l.GetActiveUser(userID)
 	if err != nil {
 		if !errors.Is(err, ErrUserNotFound) && !errors.Is(err, model.ErrUserIdentityMissing) {
+			// 禁用状态和数据库故障不缓存成“不存在”，避免恢复后继续误拒绝。
 			return nil, errors.Tag(err)
 		}
-		if l.Redis() != nil {
-			if err := l.cacheMissingUserProfile(userID); err != nil {
-				return nil, errors.Wrapf(err, "写入用户资料空值缓存失败 user_id=%d", userID)
-			}
+		// 缓存写入入口统一处理未配置 Redis 的场景，回源层只保留失败上下文。
+		if err := l.cacheMissingUserProfile(userID); err != nil {
+			return nil, errors.Wrapf(err, "写入用户资料空值缓存失败 user_id=%d", userID)
 		}
 		return nil, ErrUserNotFound
 	}
 	profile := BuildUserProfile(user)
-	if l.Redis() != nil {
-		if err := l.CacheUserProfile(userID, profile); err != nil {
-			return nil, errors.Wrapf(err, "写入用户资料缓存失败 user_id=%d", userID)
-		}
+	// 数据库查询成功但缓存写入失败仍返回错误，不掩盖跨实例缓存不可用。
+	if err := l.CacheUserProfile(userID, profile); err != nil {
+		return nil, errors.Wrapf(err, "写入用户资料缓存失败 user_id=%d", userID)
 	}
 	return profile, nil
 }
@@ -223,11 +225,8 @@ func userProfileRebuildWaitDelay(attempt int, jitter time.Duration) time.Duratio
 	if base > userProfileRebuildWaitMaxBaseDelay {
 		base = userProfileRebuildWaitMaxBaseDelay
 	}
-	if jitter < 0 {
-		jitter = 0
-	} else if jitter > userProfileRebuildWaitJitter {
-		jitter = userProfileRebuildWaitJitter
-	}
+	// 抖动仅分散竞争者，不允许缩短基础等待或突破单轮上限。
+	jitter = min(max(jitter, 0), userProfileRebuildWaitJitter)
 	return base + jitter
 }
 
@@ -247,13 +246,25 @@ func (l *UserLogic) cachedUserProfile(cacheKey string, userID int64) (*types.Use
 		return nil, false, errors.Wrapf(err, "读取用户资料缓存失败 user_id=%d", userID)
 	}
 	if corelogic.CacheIsEmptyMarker(value) {
+		// 空值标记也是缓存命中，后续不能继续抢锁或回源。
 		return nil, true, ErrUserNotFound
 	}
 	profile := &types.UserProfile{}
 	if err := json.Unmarshal([]byte(value), profile); err != nil {
-		return nil, false, errors.Wrapf(err, "解析用户资料缓存失败 user_id=%d", userID)
+		// 损坏值只删除当前用户的精确 Key；后续沿既有 singleflight 和分布式锁回源，避免持续错误。
+		if deleteErr := l.Redis().Del(l.Ctx, cacheKey).Err(); deleteErr != nil {
+			return nil, false, errors.Wrapf(err, "解析用户资料缓存失败且删除损坏值失败 user_id=%d delete_error=%v", userID, deleteErr)
+		}
+		return nil, false, nil
 	}
-	return profile, profile.ID > 0, nil
+	if profile.ID != userID {
+		// 缓存必须与物理 key 中的用户 ID 一致，不能把损坏或误写值当作另一个用户资料返回。
+		if deleteErr := l.Redis().Del(l.Ctx, cacheKey).Err(); deleteErr != nil {
+			return nil, false, errors.Wrapf(deleteErr, "删除用户 ID 不匹配的资料缓存失败 user_id=%d cached_user_id=%d", userID, profile.ID)
+		}
+		return nil, false, nil
+	}
+	return profile, true, nil
 }
 
 // cacheMissingUserProfile 短时缓存用户不存在结果，避免重复穿透数据库。
@@ -273,20 +284,31 @@ func (l *UserLogic) CacheUserProfile(userID int64, profile *types.UserProfile) e
 	if userID <= 0 || profile == nil || l.Redis() == nil {
 		return nil
 	}
-	return l.RdsSetJSONValue(l.userProfileKey(userID), profile, l.profileCacheTTL())
+	if profile.ID != userID {
+		return errors.Errorf("用户资料缓存 ID 不匹配 user_id=%d profile_id=%d", userID, profile.ID)
+	}
+	return l.RdsSetJSONValue(userProfileLogicalKey(userID), profile, l.profileCacheTTL())
 }
 
-// DeleteUserProfileCache 删除用户资料缓存。
+// DeleteUserProfileCache 等待已开始的回源结束后删除资料，避免旧快照重新发布。
 func (l *UserLogic) DeleteUserProfileCache(userID int64) error {
 	if userID <= 0 || l.Redis() == nil {
 		return nil
 	}
-	return l.RdsDelKeys(l.userProfileKey(userID))
+	// 复用回源锁的有界等待；竞争或取消时返回错误，不越过锁直接删缓存。
+	return redislock.WithLock(l.Ctx, l.Redis(), l.userProfileRebuildLockKey(userID), userProfileRebuildLockTTL, func(lockCtx context.Context) error {
+		return NewUserLogic(lockCtx, l.Svc).RdsDelKeys(userProfileLogicalKey(userID))
+	})
 }
 
 // userProfileKey 生成当前站点下的用户资料缓存 Key。
 func (l *UserLogic) userProfileKey(userID int64) string {
-	return l.AppRedisKey(fmt.Sprintf(keys.UserProfile, userID))
+	return l.AppRedisKey(userProfileLogicalKey(userID))
+}
+
+// userProfileLogicalKey 返回不含 app_id 的用户资料逻辑 key，仅交给统一命名空间入口处理。
+func userProfileLogicalKey(userID int64) string {
+	return fmt.Sprintf(keys.UserProfile, userID)
 }
 
 // userProfileRebuildLockKey 生成当前站点下的用户资料缓存重建锁 Key。
@@ -294,16 +316,12 @@ func (l *UserLogic) userProfileRebuildLockKey(userID int64) string {
 	return l.AppRedisKey(fmt.Sprintf(keys.UserProfileRebuildLock, userID))
 }
 
-// profileCacheTTL 返回用户资料缓存 TTL，未配置时使用 5 分钟。
+// profileCacheTTL 返回用户资料缓存 TTL，并在直接装配绕过启动校验时限制为 1 天以内。
 func (l *UserLogic) profileCacheTTL() int64 {
-	cfg := l.Svc.CurrentConfig()
-	if cfg.Auth.ProfileCacheTTLSeconds > 0 {
-		return cfg.Auth.ProfileCacheTTLSeconds
-	}
-	return 300
+	return config.ProfileCacheTTLSeconds(l.Svc.CurrentConfig().Auth.ProfileCacheTTLSeconds)
 }
 
-// BuildUserProfile 将用户实体转换为前台可展示资料。
+// BuildUserProfile 只导出公开字段，联系方式使用脱敏值，密码哈希和密文不得进入响应。
 func BuildUserProfile(user *model.User) *types.UserProfile {
 	if user == nil {
 		return &types.UserProfile{}

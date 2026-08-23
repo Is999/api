@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	codes "api/common/codes"
-	authlogic "api/internal/logic/auth"
+	"api/internal/infra/collectorx"
 	"api/internal/security"
 
 	"github.com/Is999/go-utils/errors"
@@ -17,21 +17,20 @@ func resolveSecurityFailureCode(reason string, fallback int, err error) int {
 		return codes.SecurityPayloadTooLarge
 	}
 	switch strings.TrimSpace(reason) {
-	case authlogic.AuthEventReasonSecurityAppIDInvalid:
+	case collectorx.AuthSecurityReasonSecurityAppIDInvalid:
 		return codes.SecurityAppIDInvalid
-	case authlogic.AuthEventReasonSecurityKeyUnavailable:
+	case collectorx.AuthSecurityReasonSecurityKeyUnavailable:
 		return codes.SecurityKeyUnavailable
-	case authlogic.AuthEventReasonSignatureFailed:
-		return codes.SecuritySignatureFailed
-	case authlogic.AuthEventReasonSecurityPayloadTooLarge:
+	case collectorx.AuthSecurityReasonSignatureFailed,
+		collectorx.AuthSecurityReasonRequestDecryptFailed:
+		return codes.SecurityRequestRejected
+	case collectorx.AuthSecurityReasonSecurityPayloadTooLarge:
 		return codes.SecurityPayloadTooLarge
-	case authlogic.AuthEventReasonResponseSignFailed:
+	case collectorx.AuthSecurityReasonResponseSignFailed:
 		return codes.SecurityResponseSignFailed
-	case authlogic.AuthEventReasonCryptoDisabled:
+	case collectorx.AuthSecurityReasonCryptoDisabled:
 		return codes.SecurityCryptoDisabled
-	case authlogic.AuthEventReasonRequestDecryptFailed:
-		return codes.SecurityRequestDecryptFailed
-	case authlogic.AuthEventReasonResponseEncryptFailed:
+	case collectorx.AuthSecurityReasonResponseEncryptFailed:
 		return codes.SecurityResponseEncryptFailed
 	default:
 		if fallback != codes.Undefined {
@@ -44,11 +43,11 @@ func resolveSecurityFailureCode(reason string, fallback int, err error) int {
 // resolveSecurityFailureReason 将安全链路内部错误归并为稳定风控原因。
 func resolveSecurityFailureReason(reason string, err error) string {
 	if errors.Is(err, security.ErrSecurityPayloadTooLarge) {
-		return authlogic.AuthEventReasonSecurityPayloadTooLarge
+		return collectorx.AuthSecurityReasonSecurityPayloadTooLarge
 	}
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
-		return authlogic.AuthEventReasonSecurityFailed
+		return collectorx.AuthSecurityReasonSecurityFailed
 	}
 	return reason
 }

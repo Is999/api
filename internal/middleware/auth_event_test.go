@@ -18,8 +18,9 @@ import (
 
 // TestAuthMiddlewareMissingBearerEmitsAuthSecurityEvent 确保鉴权失败也会投递脱敏风控事件。
 func TestAuthMiddlewareMissingBearerEmitsAuthSecurityEvent(t *testing.T) {
+	// 真实认证中间件处理无 Bearer 请求，业务 Handler 不得执行。
 	svcCtx, seen := newAuthMiddlewareEventService(t)
-	middleware := NewAuthMiddleware(svcCtx)
+	middleware := newTestAuthMiddleware(svcCtx)
 	nextCalled := false
 	handler := middleware.Handle(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
@@ -43,6 +44,7 @@ func TestAuthMiddlewareMissingBearerEmitsAuthSecurityEvent(t *testing.T) {
 	if event.BizType != authlogic.AuthCollectorBizType {
 		t.Fatalf("biz type = %q, want %q", event.BizType, authlogic.AuthCollectorBizType)
 	}
+	// 事件必须携带失败原因和路由，客户端地址只能以哈希形式出现。
 	var payload map[string]any
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		t.Fatalf("Unmarshal(payload) error = %v", err)
@@ -65,7 +67,7 @@ func TestAuthMiddlewareMissingBearerEmitsAuthSecurityEvent(t *testing.T) {
 // TestEmitAuthFailureEventIncludesKnownIdentity 确保已解析身份的失败事件可按用户聚合。
 func TestEmitAuthFailureEventIncludesKnownIdentity(t *testing.T) {
 	svcCtx, seen := newAuthMiddlewareEventService(t)
-	middleware := NewAuthMiddleware(svcCtx)
+	middleware := newTestAuthMiddleware(svcCtx)
 
 	middleware.emitAuthFailureEvent(context.Background(), authlogic.AuthEventReasonSessionExpired, &UserTokenIdentity{
 		UserID:    42,
@@ -106,7 +108,7 @@ func TestEmitSecurityFailureEvent(t *testing.T) {
 	requestctx.SetRequest(ctx, http.MethodPost, "/api/auth/login", "127.0.0.1")
 	requestctx.SetTrace(ctx, "trace-id", "span-id")
 
-	emitSecurityFailureEvent(ctx, svcCtx, authlogic.AuthEventReasonRequestDecryptFailed)
+	emitSecurityFailureEvent(ctx, &testMiddlewareRuntime{svc: svcCtx}, authlogic.AuthEventReasonRequestDecryptFailed)
 
 	if len(*seen) != 1 {
 		t.Fatalf("collector events = %d, want 1", len(*seen))
@@ -130,7 +132,7 @@ func TestEmitSecurityFailureEvent(t *testing.T) {
 	}
 }
 
-// newAuthMiddlewareEventService 构造测试依赖。
+// newAuthMiddlewareEventService 使用内存 Collector 检查脱敏载荷，不验证实际队列投递。
 func newAuthMiddlewareEventService(t *testing.T) (*svc.ServiceContext, *[]collectorx.Event) {
 	t.Helper()
 	cfg := config.Config{
@@ -149,9 +151,9 @@ func newAuthMiddlewareEventService(t *testing.T) (*svc.ServiceContext, *[]collec
 
 // fakeMiddlewareCollector 记录中间件投递的 Collector 事件。
 type fakeMiddlewareCollector struct {
-	events    []collectorx.Event   // 已投递事件
-	alertHook collectorx.AlertHook // 运行异常告警钩子
-	closed    bool                 // 是否已关闭
+	events    []collectorx.Event   // 顺序记录测试事件；该夹具不供并发调用。
+	alertHook collectorx.AlertHook // 保存注册回调，本组测试不主动触发告警。
+	closed    bool                 // 记录生命周期调用，不关闭外部资源。
 }
 
 // Enqueue 记录一条事件。

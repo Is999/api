@@ -28,6 +28,7 @@ func NewGormLogger(slowThreshold time.Duration) gormlogger.Interface {
 
 // LogMode 返回一份新的 logger 副本。
 func (g *GormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
+	// 会话级 Debug 不得修改其它请求正在共用的日志级别。
 	cp := *g
 	cp.level = level
 	return &cp
@@ -77,10 +78,11 @@ func (g *GormLogger) Trace(ctx context.Context, begin time.Time, fc func() (stri
 		logx.Field("sql", sql),
 	}
 
+	// 查询失败优先；成功慢查询属于 Warn，不能绕过会话设置的 Error 级别。
 	switch {
 	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
 		ErrorwSkip(ctx, 1, "数据库 查询失败", err, fields...)
-	case g.slowThreshold > 0 && elapsed > g.slowThreshold:
+	case g.level >= gormlogger.Warn && g.slowThreshold > 0 && elapsed > g.slowThreshold:
 		SlowwSkip(ctx, 1, "数据库 慢查询", fields...)
 	case g.level >= gormlogger.Info:
 		InfowSkip(ctx, 1, "数据库 查询", fields...)

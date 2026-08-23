@@ -13,6 +13,20 @@ func TestValidateNamesUniqueRejectsDuplicate(t *testing.T) {
 	}
 }
 
+// TestValidateNamesUniqueRejectsNonCanonicalName 确保注册入口不会裁剪出第二套名称。
+func TestValidateNamesUniqueRejectsNonCanonicalName(t *testing.T) {
+	if err := ValidateNamesUnique(KindRoute, []string{" user "}); err == nil {
+		t.Fatal("expected non-canonical registration name error")
+	}
+}
+
+// TestRouteModuleNamesExposesNilModule 确保 nil 模块会进入名称校验并拒绝启动。
+func TestRouteModuleNamesExposesNilModule(t *testing.T) {
+	if err := ValidateNamesUnique(KindRoute, RouteModuleNames([]handler.RouteModule{nil})); err == nil {
+		t.Fatal("expected nil route module error")
+	}
+}
+
 // TestDefaultRouteModulesNamesUnique 确保默认路由模块注册名不重复。
 func TestDefaultRouteModulesNamesUnique(t *testing.T) {
 	names := RouteModuleNames(handler.BuiltinRouteModules())

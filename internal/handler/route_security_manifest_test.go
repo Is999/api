@@ -36,7 +36,7 @@ func TestDefaultRouteSecurityManifestMatchesRouteContracts(t *testing.T) {
 // TestDefaultRouteSecurityManifestMatchesPolicies 确保清单字段和后端安全策略一致。
 func TestDefaultRouteSecurityManifestMatchesPolicies(t *testing.T) {
 	for _, item := range DefaultRouteSecurityManifest() {
-		policy := security.PolicyByRoute(string(item.Alias))
+		policy, _ := security.LookupRoutePolicy(string(item.Alias))
 		if !reflect.DeepEqual(item.RequestSign, policy.RequestSign) ||
 			!reflect.DeepEqual(item.RequestCipher, policy.RequestCipher) ||
 			!reflect.DeepEqual(item.ResponseSign, policy.ResponseSign) ||
@@ -53,9 +53,11 @@ func TestDefaultRouteSecurityManifestReturnsCopies(t *testing.T) {
 		if len(item.RequestSign) == 0 {
 			continue
 		}
-		original := security.PolicyByRoute(string(item.Alias)).RequestSign[0]
+		policy, _ := security.LookupRoutePolicy(string(item.Alias))
+		original := policy.RequestSign[0]
 		item.RequestSign[0] = "changed"
-		if got := security.PolicyByRoute(string(item.Alias)).RequestSign[0]; got != original {
+		current, _ := security.LookupRoutePolicy(string(item.Alias))
+		if got := current.RequestSign[0]; got != original {
 			t.Fatalf("global security policy changed alias=%s got=%s want=%s", item.Alias, got, original)
 		}
 		return
@@ -75,28 +77,28 @@ func TestDefaultRouteSecurityManifestMatchesFrontendSnapshot(t *testing.T) {
 	}
 }
 
-// routeSecurityManifestSnapshot 表示测试使用的辅助结构。
+// routeSecurityManifestSnapshot 对应前端同步文件的顶层 JSON 契约。
 type routeSecurityManifestSnapshot struct {
 	Version int                                 `json:"version"` // 快照版本
 	Routes  []routeSecurityManifestSnapshotItem `json:"routes"`  // 前端同步路由清单
 }
 
-// routeSecurityManifestSnapshotItem 表示测试使用的辅助结构。
+// routeSecurityManifestSnapshotItem 固定单条路由在前后端共享的安全字段。
 type routeSecurityManifestSnapshotItem struct {
-	Alias          string             `json:"alias"`          // 路由别名
-	Method         string             `json:"method"`         // HTTP 方法
-	Path           string             `json:"path"`           // HTTP 路径
-	Access         shared.RouteAccess `json:"access"`         // 访问边界
-	Chain          RouteSecurityChain `json:"chain"`          // 实际安全链路
-	Describe       string             `json:"describe"`       // 中文业务说明
-	RequestSign    []string           `json:"requestSign"`    // 请求签名字段
-	RequestCipher  []string           `json:"requestCipher"`  // 请求解密字段
-	ResponseSign   []string           `json:"responseSign"`   // 响应回签字段
-	ResponseCipher []string           `json:"responseCipher"` // 响应加密字段
-	DocumentPath   string             `json:"documentPath"`   // 接口文档路径
+	Alias          string                    `json:"alias"`          // 路由别名
+	Method         string                    `json:"method"`         // HTTP 方法
+	Path           string                    `json:"path"`           // HTTP 路径
+	Access         shared.RouteAccess        `json:"access"`         // 访问边界
+	Chain          shared.RouteSecurityChain `json:"chain"`          // 实际安全链路
+	Describe       string                    `json:"describe"`       // 中文业务说明
+	RequestSign    []string                  `json:"requestSign"`    // 请求签名字段
+	RequestCipher  []string                  `json:"requestCipher"`  // 请求解密字段
+	ResponseSign   []string                  `json:"responseSign"`   // 响应回签字段
+	ResponseCipher []string                  `json:"responseCipher"` // 响应加密字段
+	DocumentPath   string                    `json:"documentPath"`   // 接口文档路径
 }
 
-// routeSecurityManifestSnapshotJSON 返回路由测试辅助数据。
+// routeSecurityManifestSnapshotJSON 按稳定缩进生成前端同步快照全文。
 func routeSecurityManifestSnapshotJSON(t *testing.T) string {
 	t.Helper()
 	body, err := json.MarshalIndent(routeSecurityManifestSnapshot{
@@ -109,7 +111,7 @@ func routeSecurityManifestSnapshotJSON(t *testing.T) string {
 	return string(body) + "\n"
 }
 
-// routeSecurityManifestSnapshotItems 返回路由测试辅助数据。
+// routeSecurityManifestSnapshotItems 将运行时清单转换为前端快照结构。
 func routeSecurityManifestSnapshotItems(items []RouteSecurityManifestItem) []routeSecurityManifestSnapshotItem {
 	result := make([]routeSecurityManifestSnapshotItem, 0, len(items))
 	for _, item := range items {
@@ -130,7 +132,7 @@ func routeSecurityManifestSnapshotItems(items []RouteSecurityManifestItem) []rou
 	return result
 }
 
-// emptyToSlice 表示测试辅助逻辑。
+// emptyToSlice 把 nil 字段清单写成 JSON 空数组，锁定前端快照类型。
 func emptyToSlice(fields []string) []string {
 	if len(fields) == 0 {
 		return []string{}

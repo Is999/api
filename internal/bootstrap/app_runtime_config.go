@@ -8,6 +8,6 @@ import (
 // publishRuntimeConfig 发布进程级运行配置快照，供 Redis key、签名和 MFA 等跨包能力读取。
 func publishRuntimeConfig(c config.Config) runtimecfg.Snapshot {
 	previous := runtimecfg.Get()
-	runtimecfg.Set(c)
+	runtimecfg.Set(runtimecfg.Snapshot{AppID: c.AppID})
 	return previous
 }

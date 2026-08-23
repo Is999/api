@@ -1,27 +1,23 @@
 package runtimecfg
 
-import (
-	"testing"
+import "testing"
 
-	"api/internal/config"
-)
-
-// TestSetTrimsAppID 验证对应场景符合预期。
-func TestSetTrimsAppID(t *testing.T) {
+// TestSetPreservesAppID 验证运行快照不再暗中改写启动配置。
+func TestSetPreservesAppID(t *testing.T) {
 	prev := Get()
-	Set(config.Config{AppID: " 215 "})
+	Set(Snapshot{AppID: " 215 "})
 	t.Cleanup(func() {
 		Restore(prev)
 	})
-	if got := AppID(); got != "215" {
-		t.Fatalf("AppID() = %q, want 215", got)
+	if got := AppID(); got != " 215 " {
+		t.Fatalf("AppID() = %q, want exact input", got)
 	}
 }
 
-// TestGetReturnsEmptyBeforeSet 验证对应场景符合预期。
+// TestGetReturnsEmptyBeforeSet 确保空快照不会生成 AppID。
 func TestGetReturnsEmptyBeforeSet(t *testing.T) {
 	prev := Get()
-	Set(config.Config{})
+	Set(Snapshot{})
 	t.Cleanup(func() {
 		Restore(prev)
 	})
@@ -30,10 +26,10 @@ func TestGetReturnsEmptyBeforeSet(t *testing.T) {
 	}
 }
 
-// TestRestoreSnapshot 验证对应场景符合预期。
+// TestRestoreSnapshot 确保测试或重载可恢复先前运行快照。
 func TestRestoreSnapshot(t *testing.T) {
 	prev := Get()
-	Set(config.Config{AppID: "new-app"})
+	Set(Snapshot{AppID: "new-app"})
 	Restore(Snapshot{AppID: "old-app"})
 	t.Cleanup(func() {
 		Restore(prev)

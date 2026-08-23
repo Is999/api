@@ -56,6 +56,7 @@ func (s *State) StartWatcher(run func(context.Context)) bool {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	watcher := &watcherRun{cancel: cancel, done: make(chan struct{})}
+	// 启动 goroutine 前先占位，并发 Start 不会再创建第二个 watcher。
 	s.watcher = watcher
 	s.stateMu.Unlock()
 	go func() {
@@ -81,6 +82,7 @@ func (s *State) StopWatcher(ctx context.Context) error {
 	}
 	watcher.cancel()
 	s.stateMu.Unlock()
+	// 退出前保留 watcher 占位，Stop 超时后也不允许另一个实例并行启动。
 	select {
 	case <-watcher.done:
 		return nil
@@ -102,6 +104,7 @@ func (s *State) WatcherRunning() bool {
 // clearWatcher 在 watcher 自然退出后清理运行标记，允许后续重新启动。
 func (s *State) clearWatcher(watcher *watcherRun) {
 	s.stateMu.Lock()
+	// 占位释放与退出通知在同一锁内完成，新一轮启动不会观察到半清理状态。
 	if s.watcher == watcher {
 		s.watcher = nil
 	}
@@ -116,6 +119,7 @@ func (s *State) UpdateStatus(svcCtx *svc.ServiceContext, mutator func(svc.HotRel
 	}
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
+	// 读旧值与发布新值必须串行，避免手动重载和 watcher 丢失彼此的状态更新。
 	status := svcCtx.CurrentHotReloadStatus()
 	svcCtx.UpdateHotReloadStatus(mutator(status))
 }
@@ -129,7 +133,7 @@ func (s *State) SuppressFailure(errorKey string, now time.Time, window time.Dura
 	defer s.logMu.Unlock()
 	sameError := errorKey == s.lastError && !s.lastLogAt.IsZero() && now.Sub(s.lastLogAt) < window
 	if sameError {
-		s.lastError = errorKey
+		// 抑制重复日志不延后窗口，持续故障仍会定期输出。
 		return true
 	}
 	s.lastError = errorKey
@@ -157,9 +161,6 @@ func Summary(cfg config.Config) string {
 func CheckInterval(seconds int) time.Duration {
 	if seconds <= 0 {
 		seconds = 5
-	}
-	if seconds < 1 {
-		seconds = 1
 	}
 	return time.Duration(seconds) * time.Second
 }

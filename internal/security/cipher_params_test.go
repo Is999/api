@@ -6,13 +6,17 @@ import (
 	"testing"
 )
 
-// TestEncodeCipherParams 验证对应场景符合预期。
+// TestEncodeCipherParams 确保密文字段头只编码规范字段列表，全量或非法字段拒绝生成协议头。
 func TestEncodeCipherParams(t *testing.T) {
 	if got := EncodeCipherParams([]string{CipherWholeBody}); got != "" {
 		t.Fatalf("EncodeCipherParams whole body = %q, want empty", got)
 	}
 
-	got := EncodeCipherParams([]string{"token", " token ", "", "user.email"})
+	if got := EncodeCipherParams([]string{"token", " token ", "", "user.email"}); got != "" {
+		t.Fatalf("EncodeCipherParams non-canonical fields = %q, want empty", got)
+	}
+
+	got := EncodeCipherParams([]string{"token", "user.email"})
 	body, err := base64.StdEncoding.DecodeString(got)
 	if err != nil {
 		t.Fatalf("DecodeString() error = %v", err)

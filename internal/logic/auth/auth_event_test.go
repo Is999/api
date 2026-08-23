@@ -18,6 +18,7 @@ import (
 
 // TestRecordAuthEventEnqueuesSanitizedPayload 确保认证事件只投递脱敏后的结构化负载。
 func TestRecordAuthEventEnqueuesSanitizedPayload(t *testing.T) {
+	// 请求上下文覆盖链路、路由、节点和客户端地址等事件来源。
 	cfg := authEventTestConfig(true)
 	svcCtx, collector := newAuthEventTestService(cfg)
 	ctx, _ := requestctx.New(context.Background())
@@ -27,6 +28,7 @@ func TestRecordAuthEventEnqueuesSanitizedPayload(t *testing.T) {
 	requestctx.SetNode(ctx, "node-a")
 	requestctx.SetMode(ctx, "dev")
 
+	// 输入包含必须哈希的身份、会话和客户端信息。
 	RecordAuthEvent(ctx, svcCtx, AuthEventInput{
 		Action:    AuthEventActionLoginSuccess,
 		UserID:    42,
@@ -49,6 +51,7 @@ func TestRecordAuthEventEnqueuesSanitizedPayload(t *testing.T) {
 	if event.PartitionKey != "site-a:42" {
 		t.Fatalf("partition key = %q, want site-a:42", event.PartitionKey)
 	}
+	// 核对事件动作与请求路由，避免业务失败被归入其它入口。
 	var payload authEventPayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		t.Fatalf("Unmarshal(payload) error = %v", err)
@@ -59,7 +62,8 @@ func TestRecordAuthEventEnqueuesSanitizedPayload(t *testing.T) {
 	if payload.AppID != "site-a" || payload.Route != string(routealias.AuthLogin) || payload.TraceID != "trace-demo" || payload.SpanID != "span-demo" {
 		t.Fatalf("payload trace fields = %+v", payload)
 	}
-	if payload.IdentityHash != authEventHash(cfg, "username:demo_user") {
+	// 身份按规范化值计算 HMAC，原始 IP 和 sid 也只能以摘要形式投递。
+	if payload.IdentityHash != authSensitiveValueHash(cfg, "username:demo_user") {
 		t.Fatalf("identity hash = %q, want deterministic hmac", payload.IdentityHash)
 	}
 	if payload.ClientIPHash == "" || payload.SessionHash == "" {
@@ -158,7 +162,7 @@ func TestRuntimeRegistrySpecsValid(t *testing.T) {
 	}
 }
 
-// authEventTestConfig 表示测试辅助逻辑。
+// authEventTestConfig 返回可切换 Collector 开关的最小事件配置。
 func authEventTestConfig(enabled bool) config.Config {
 	return config.Config{
 		AppID:     "site-a",
@@ -172,11 +176,11 @@ func authEventTestConfig(enabled bool) config.Config {
 
 // fakeCollector 记录业务投递的 Collector 事件。
 type fakeCollector struct {
-	events          []collectorx.Event   // 已投递事件
-	enqueueErr      error                // 投递时返回的错误
-	alertHook       collectorx.AlertHook // 运行异常告警钩子
-	closed          bool                 // 是否已关闭
-	enqueueDeadline time.Time            // 最近一次投递上下文的截止时间
+	events          []collectorx.Event   // 顺序保存成功投递；夹具不供并发调用。
+	enqueueErr      error                // 非空时在保存事件前模拟队列失败。
+	alertHook       collectorx.AlertHook // 只保留回调，不连接真实告警组件。
+	closed          bool                 // 记录生命周期关闭调用。
+	enqueueDeadline time.Time            // 断言生产投递是否设置有限等待时间。
 }
 
 // Enqueue 记录一条事件。
@@ -208,7 +212,7 @@ func (f *fakeCollector) Close(context.Context) error {
 	return nil
 }
 
-// newAuthEventTestService 构造测试依赖。
+// newAuthEventTestService 使用内存 Collector 观察认证事件，不启动真实 Kafka 或任务消费者。
 func newAuthEventTestService(cfg config.Config) (*svc.ServiceContext, *fakeCollector) {
 	collector := &fakeCollector{events: make([]collectorx.Event, 0, 1)}
 	svcCtx := svc.NewServiceContext(cfg, "v1", svc.Dependencies{})

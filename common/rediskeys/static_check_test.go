@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// TestRedisKeysFileOnlyDefinesConstants 验证对应场景符合预期。
+// TestRedisKeysFileOnlyDefinesConstants 确保集中清单只包含 Redis Key 常量声明。
 func TestRedisKeysFileOnlyDefinesConstants(t *testing.T) {
 	fset := token.NewFileSet()
 	file := parseRedisKeysFile(t, fset)
@@ -28,7 +28,7 @@ func TestRedisKeysFileOnlyDefinesConstants(t *testing.T) {
 	}
 }
 
-// TestRedisKeyCommentsIncludeTypeAndTTL 验证对应场景符合预期。
+// TestRedisKeyCommentsIncludeTypeAndTTL 只检查类型与 TTL 标识存在；声明是否与读写命令、过期行为一致仍需语义复核。
 func TestRedisKeyCommentsIncludeTypeAndTTL(t *testing.T) {
 	fset := token.NewFileSet()
 	file := parseRedisKeysFile(t, fset)
@@ -53,7 +53,7 @@ func TestRedisKeyCommentsIncludeTypeAndTTL(t *testing.T) {
 	}
 }
 
-// TestRedisKeyConstantsStayInRedisKeysFile 验证对应场景符合预期。
+// TestRedisKeyConstantsStayInRedisKeysFile 确保 Redis Key 常量不散落在集中清单外。
 func TestRedisKeyConstantsStayInRedisKeysFile(t *testing.T) {
 	dir := redisKeysPackageDir(t)
 	entries, err := os.ReadDir(dir)
@@ -85,7 +85,7 @@ func TestRedisKeyConstantsStayInRedisKeysFile(t *testing.T) {
 	}
 }
 
-// TestNoReferenceOnlyMoneyBalanceTemplateName 验证对应场景符合预期。
+// TestNoReferenceOnlyMoneyBalanceTemplateName 确保示例余额模板名不会进入生产 key 契约。
 func TestNoReferenceOnlyMoneyBalanceTemplateName(t *testing.T) {
 	dir := redisKeysPackageDir(t)
 	entries, err := os.ReadDir(dir)
@@ -101,13 +101,14 @@ func TestNoReferenceOnlyMoneyBalanceTemplateName(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
+		// 扫描包含当前测试源码，拆开禁用名称避免断言字面量把自身误判为生产模板。
 		if strings.Contains(string(data), "RedisHash"+"MoneyBalanceTemplate") {
 			t.Fatalf("%s 包含仅用于示例的余额模板名", name)
 		}
 	}
 }
 
-// parseRedisKeysFile 解析测试所需数据。
+// parseRedisKeysFile 解析集中 Redis Key 清单及其注释。
 func parseRedisKeysFile(t *testing.T, fset *token.FileSet) *ast.File {
 	t.Helper()
 	path := filepath.Join(redisKeysPackageDir(t), "redis_keys.go")
@@ -118,7 +119,7 @@ func parseRedisKeysFile(t *testing.T, fset *token.FileSet) *ast.File {
 	return file
 }
 
-// redisKeysPackageDir 表示测试辅助逻辑。
+// redisKeysPackageDir 返回当前包源码目录，供静态契约测试扫描。
 func redisKeysPackageDir(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)

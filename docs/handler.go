@@ -16,11 +16,8 @@ const (
 
 // Handler 返回 API 内网文档资源处理器；调用方仍需在路由层挂 OpsMiddleware。
 func Handler() http.HandlerFunc {
-	var initErr error
-	sub, err := fs.Sub(FS, "site")
-	if err != nil {
-		initErr = err
-	}
+	// 始终使用随二进制打包的资源，工作目录的残缺文档不能覆盖发布内容。
+	sub, initErr := fs.Sub(FS, "site")
 	fileServer := http.FileServer(http.FS(sub))
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +32,7 @@ func Handler() http.HandlerFunc {
 		}
 
 		w.Header().Set("Cache-Control", docsPageCacheHeader)
+		// 保留原请求路径供外层运维鉴权和访问日志使用。
 		req := r.Clone(r.Context())
 		req.URL.Path = "/" + docsPath
 		req.URL.RawPath = ""
@@ -44,6 +42,7 @@ func Handler() http.HandlerFunc {
 
 // internalDocsAssetPath 清洗内网文档路径，并只放行可展示给后台的文档站资源。
 func internalDocsAssetPath(requestPath string) (string, bool) {
+	// 额外解码一次以识别双重编码点段；必须在 Clean 抹去点段前拒绝穿越。
 	if text, err := url.PathUnescape(strings.TrimSpace(requestPath)); err == nil {
 		requestPath = text
 	}
@@ -51,7 +50,7 @@ func internalDocsAssetPath(requestPath string) (string, bool) {
 		return "", false
 	}
 	cleanPath := pathpkg.Clean("/" + strings.TrimLeft(strings.TrimSpace(requestPath), "/"))
-	if cleanPath == internalDocsPathPrefix || cleanPath == internalDocsPathPrefix+"/" {
+	if cleanPath == internalDocsPathPrefix {
 		return internalDocsDefaultPath, true
 	}
 	if !strings.HasPrefix(cleanPath, internalDocsPathPrefix+"/") {

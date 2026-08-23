@@ -2,6 +2,17 @@
   "version": 2,
   "signVectors": [
     {
+      "name": "json_cipher_signs_actual_field",
+      "appID": "demo-app",
+      "traceID": "trace-demo-004",
+      "timestamp": "1700000000",
+      "fields": ["payload"],
+      "data": {
+        "payload": "Y2lwaGVydGV4dA=="
+      },
+      "expected": "v2|app=8:demo-app|trace=14:trace-demo-004|timestamp=10:1700000000|field=7:payload16:Y2lwaGVydGV4dA=="
+    },
+    {
       "name": "header_only_request",
       "appID": "demo-app",
       "traceID": "trace-demo-000",

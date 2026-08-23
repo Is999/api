@@ -25,28 +25,30 @@ const (
 
 // New 创建 Redis 客户端，并注册统一的命令耗时观测 hook。
 func New(ctx context.Context, cfg config.RedisConfig, obs config.ObservabilityConfig) (redis.UniversalClient, error) {
+	if err := validateConfig(cfg); err != nil {
+		return nil, errors.Tag(err)
+	}
 	addrs, err := resolveAddrs(cfg.Addrs)
 	if err != nil {
 		return nil, errors.Tag(err)
 	}
-	addrMap := resolveAddrMap(cfg.AddrMap)
+	addrMap, err := resolveAddrMap(cfg.AddrMap)
+	if err != nil {
+		return nil, errors.Tag(err)
+	}
+	// 逐个探测声明地址，避免客户端仅因单个种子可用而掩盖错误节点。
 	if err := pingConfiguredAddrs(ctx, cfg, addrs, addrMap); err != nil {
 		return nil, errors.Tag(err)
 	}
 
-	poolSize := cfg.PoolSize
-	if poolSize <= 0 {
-		poolSize = 100
-	}
-
 	var rdb redis.UniversalClient
-	if !isClusterMode(cfg, addrs) {
+	if !isClusterMode(cfg) {
 		option := &redis.Options{
 			Addr:                  addrs[0],
 			Password:              cfg.Password,
 			DB:                    cfg.DB,
-			PoolSize:              poolSize,
-			MinIdleConns:          poolSize / 5,
+			PoolSize:              cfg.PoolSize,
+			MinIdleConns:          cfg.PoolSize / 5,
 			DisableIdentity:       true,
 			ContextTimeoutEnabled: true,
 			Protocol:              2,
@@ -60,8 +62,8 @@ func New(ctx context.Context, cfg config.RedisConfig, obs config.ObservabilityCo
 		clusterOpts := &redis.ClusterOptions{
 			Addrs:                 addrs,
 			Password:              cfg.Password,
-			PoolSize:              poolSize,
-			MinIdleConns:          poolSize / 5,
+			PoolSize:              cfg.PoolSize,
+			MinIdleConns:          cfg.PoolSize / 5,
 			DisableIdentity:       true,
 			ContextTimeoutEnabled: true,
 			Protocol:              2,
@@ -69,9 +71,10 @@ func New(ctx context.Context, cfg config.RedisConfig, obs config.ObservabilityCo
 				Mode: maintnotifications.ModeDisabled,
 			},
 		}
-		applyClusterTLSConfig(clusterOpts, cfg, obs)
+		applyClusterTLSConfig(clusterOpts, cfg)
 		if len(addrMap) > 0 {
 			clusterOpts.NewClient = func(opt *redis.Options) *redis.Client {
+				// 每个节点复制连接参数后改写地址，避免共享可变 Option。
 				cloned := *opt
 				cloned.Addr = rewriteClusterAddr(opt.Addr, addrMap)
 				return redis.NewClient(&cloned)
@@ -80,7 +83,9 @@ func New(ctx context.Context, cfg config.RedisConfig, obs config.ObservabilityCo
 		rdb = redis.NewClusterClient(clusterOpts)
 	}
 
+	// hook 在正式健康检查前注册，使首条客户端命令进入统一观测。
 	rdb.AddHook(newHook(time.Duration(obs.RedisSlowMs) * time.Millisecond))
+	// 再用正式客户端验证最终连接配置。
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		_ = rdb.Close()
 		return nil, errors.Tag(err)
@@ -88,7 +93,38 @@ func New(ctx context.Context, cfg config.RedisConfig, obs config.ObservabilityCo
 	return rdb, nil
 }
 
-// resolveAddrs 清洗 Redis 地址列表并去重。
+// validateConfig 为直接调用 Redis 基础设施的入口执行严格启动校验，禁止绕过 bootstrap 后静默改写配置。
+func validateConfig(cfg config.RedisConfig) error {
+	if cfg.Type != "single" && cfg.Type != "cluster" {
+		return errors.Errorf("redis.type 仅支持 single/cluster，且不能为空")
+	}
+	if cfg.PoolSize <= 0 || cfg.PoolSize > config.MaxRedisPoolSize {
+		return errors.Errorf("redis.pool_size 必须在 1-%d 之间", config.MaxRedisPoolSize)
+	}
+	if len(cfg.Addrs) > config.MaxRedisAddressCount {
+		return errors.Errorf("redis.addrs 不能超过 %d 个地址", config.MaxRedisAddressCount)
+	}
+	if len(cfg.AddrMap) > config.MaxRedisAddressMapCount {
+		return errors.Errorf("redis.addr_map 不能超过 %d 项", config.MaxRedisAddressMapCount)
+	}
+	if cfg.Type == "single" {
+		if len(cfg.Addrs) != 1 {
+			return errors.Errorf("redis.type=single 时 addrs 必须且只能配置一个地址")
+		}
+		if len(cfg.AddrMap) > 0 {
+			return errors.Errorf("redis.addr_map 仅支持 cluster 模式")
+		}
+	}
+	if cfg.Type == "cluster" && cfg.DB != 0 {
+		return errors.Errorf("redis.type=cluster 时 db 必须为 0")
+	}
+	if cfg.DB < 0 {
+		return errors.Errorf("redis.db 不能小于 0")
+	}
+	return nil
+}
+
+// resolveAddrs 校验 Redis 地址列表，任何空白或重复值都必须阻断启动。
 func resolveAddrs(addrs []string) ([]string, error) {
 	if len(addrs) == 0 {
 		return nil, errors.Errorf("缺少 Redis 地址配置")
@@ -97,30 +133,28 @@ func resolveAddrs(addrs []string) ([]string, error) {
 	seen := make(map[string]struct{}, len(addrs))
 	for _, addr := range addrs {
 		trimmed := strings.TrimSpace(addr)
-		if trimmed == "" {
-			continue
+		if trimmed == "" || trimmed != addr {
+			return nil, errors.Errorf("Redis 地址不能包含空值或首尾空白")
 		}
 		if _, ok := seen[trimmed]; ok {
-			continue
+			return nil, errors.Errorf("Redis 地址不能重复: %s", trimmed)
 		}
 		seen[trimmed] = struct{}{}
 		result = append(result, trimmed)
-	}
-	if len(result) == 0 {
-		return nil, errors.Errorf("缺少 Redis 地址配置")
 	}
 	return result, nil
 }
 
 // pingConfiguredAddrs 在启动期探测声明的 Redis 地址，提前暴露不可达配置。
 func pingConfiguredAddrs(ctx context.Context, cfg config.RedisConfig, addrs []string, addrMap map[string]string) error {
+	// Cluster 不支持按 DB 编号隔离，预探测与正式客户端都固定使用 DB 0。
 	db := cfg.DB
-	if isClusterMode(cfg, addrs) {
+	if isClusterMode(cfg) {
 		db = 0
 	}
 	for idx, addr := range addrs {
 		pingAddr := addr
-		if isClusterMode(cfg, addrs) {
+		if isClusterMode(cfg) {
 			pingAddr = rewriteClusterAddr(addr, addrMap)
 		}
 		option := &redis.Options{
@@ -136,6 +170,7 @@ func pingConfiguredAddrs(ctx context.Context, cfg config.RedisConfig, addrs []st
 			},
 		}
 		applyTLSConfig(option, cfg)
+		// 单地址探测结束立即关闭，不让短连接占用正式客户端连接池。
 		client := redis.NewClient(option)
 		err := client.Ping(ctx).Err()
 		_ = client.Close()
@@ -146,36 +181,26 @@ func pingConfiguredAddrs(ctx context.Context, cfg config.RedisConfig, addrs []st
 	return nil
 }
 
-// resolveAddrMap 清洗 Redis Cluster 地址改写表。
-func resolveAddrMap(raw map[string]string) map[string]string {
+// resolveAddrMap 校验 Redis Cluster 地址改写表，不接受运行期裁剪或丢弃错误项。
+func resolveAddrMap(raw map[string]string) (map[string]string, error) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 	result := make(map[string]string, len(raw))
 	for key, value := range raw {
 		trimmedKey := strings.TrimSpace(key)
 		trimmedValue := strings.TrimSpace(value)
-		if trimmedKey == "" || trimmedValue == "" {
-			continue
+		if trimmedKey == "" || trimmedValue == "" || trimmedKey != key || trimmedValue != value {
+			return nil, errors.Errorf("Redis 地址改写表不能包含空值或首尾空白")
 		}
 		result[trimmedKey] = trimmedValue
 	}
-	if len(result) == 0 {
-		return nil
-	}
-	return result
+	return result, nil
 }
 
-// isClusterMode 根据显式 type 和地址数量判断 Redis 模式。
-func isClusterMode(cfg config.RedisConfig, addrs []string) bool {
-	switch strings.ToLower(strings.TrimSpace(cfg.Type)) {
-	case "cluster":
-		return true
-	case "single", "standalone":
-		return false
-	default:
-		return len(addrs) > 1
-	}
+// isClusterMode 只按经过校验的规范 type 判断 Redis 模式。
+func isClusterMode(cfg config.RedisConfig) bool {
+	return cfg.Type == "cluster"
 }
 
 // applyTLSConfig 为单机 Redis 客户端应用 TLS 配置。
@@ -190,23 +215,14 @@ func applyTLSConfig(option *redis.Options, cfg config.RedisConfig) {
 }
 
 // applyClusterTLSConfig 为 Redis Cluster 客户端应用 TLS 配置。
-func applyClusterTLSConfig(option *redis.ClusterOptions, cfg config.RedisConfig, obs config.ObservabilityConfig) {
+func applyClusterTLSConfig(option *redis.ClusterOptions, cfg config.RedisConfig) {
 	if option == nil || !cfg.TLS {
 		return
 	}
-	insecureSkipVerify := cfg.TLSInsecureSkipVerify
-	if isDevEnvironment(obs) {
-		insecureSkipVerify = true
-	}
 	option.TLSConfig = &tls.Config{
 		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: insecureSkipVerify,
+		InsecureSkipVerify: cfg.TLSInsecureSkipVerify,
 	}
-}
-
-// isDevEnvironment 判断当前观测配置是否声明为开发环境。
-func isDevEnvironment(obs config.ObservabilityConfig) bool {
-	return strings.EqualFold(strings.TrimSpace(obs.Environment), "dev")
 }
 
 // rewriteClusterAddr 按地址改写表替换 Redis Cluster 节点地址。
@@ -215,6 +231,7 @@ func rewriteClusterAddr(addr string, addrMap map[string]string) string {
 		return addr
 	}
 	if mapped, ok := addrMap[addr]; ok && mapped != "" {
+		// 完整 host:port 映射优先于下方仅替换主机的规则。
 		return mapped
 	}
 	host, port, err := net.SplitHostPort(addr)
@@ -225,7 +242,8 @@ func rewriteClusterAddr(addr string, addrMap map[string]string) string {
 	if !ok || mappedHost == "" {
 		return addr
 	}
-	if strings.Contains(mappedHost, ":") {
+	// 裸 IPv6 自带冒号，只有完整 host:port 才能替换原端口。
+	if _, _, err := net.SplitHostPort(mappedHost); err == nil {
 		return mappedHost
 	}
 	return net.JoinHostPort(mappedHost, port)
@@ -279,6 +297,7 @@ func (h hook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessP
 
 // logSlowProcess 按慢阈值输出单条 Redis 命令日志。
 func (h hook) logSlowProcess(ctx context.Context, duration time.Duration, err error, cmd redis.Cmder) {
+	// 仅记录命令名和参数数量，缓存值与凭据不进入慢日志。
 	fields := []logx.LogField{
 		logx.Field("latency_ms", duration.Milliseconds()),
 		logx.Field("cmd", cmd.FullName()),
@@ -286,6 +305,7 @@ func (h hook) logSlowProcess(ctx context.Context, duration time.Duration, err er
 	}
 	switch {
 	case isRedisScriptCacheMiss(err, cmd):
+		// Script.Run 会继续 EVAL，NOSCRIPT 不是本次业务执行的最终结果。
 		return
 	case h.slowThreshold > 0 && duration > h.slowThreshold:
 		loggerx.Sloww(ctx, "缓存 命令耗时较高", fields...)

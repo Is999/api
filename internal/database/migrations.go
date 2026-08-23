@@ -14,7 +14,7 @@ type Migration struct {
 	SQL           string // 剥离说明后的 SQL 文本
 	Checksum      string // SQL 文本 SHA256
 	BootstrapOnly bool   // 是否仅允许新库初始化时人工执行
-	Destructive   bool   // 是否包含 DROP/种子数据等不适合在线执行的语句
+	Destructive   bool   // 是否包含需显式授权的破坏性 SQL
 }
 
 // migrationSpec 描述内置迁移资产元数据。
@@ -23,17 +23,17 @@ type migrationSpec struct {
 	name          string // 迁移名称
 	asset         string // SQL 模板资产文件名
 	bootstrapOnly bool   // 是否仅用于新库初始化
-	destructive   bool   // 是否含破坏性语句
+	destructive   bool   // 是否包含需显式授权的破坏性 SQL
 }
 
-// defaultMigrationSpecs 定义内置迁移清单，顺序即执行顺序。
+// defaultMigrationSpecs 固定完整初始化资产的执行顺序，存量结构变更不追加版本条目。
 var defaultMigrationSpecs = []migrationSpec{
-	{version: "202606220001", name: "create_user", asset: userSchemaAsset},
-	{version: "202606220002", name: "create_sys_config", asset: sysConfigSchemaAsset},
-	{version: "202606220003", name: "create_user_identity_username", asset: userIdentityUsernameSchemaAsset},
-	{version: "202606220004", name: "create_user_identity_email", asset: userIdentityEmailSchemaAsset},
-	{version: "202606220005", name: "create_user_identity_phone", asset: userIdentityPhoneSchemaAsset},
-	{version: "202606220006", name: "create_user_identity_oauth", asset: userIdentityOAuthSchemaAsset},
+	{version: "202606220001", name: "bootstrap_user", asset: userSchemaAsset, bootstrapOnly: true},
+	{version: "202606220002", name: "bootstrap_sys_config", asset: sysConfigSchemaAsset, bootstrapOnly: true},
+	{version: "202606220003", name: "bootstrap_user_identity_username", asset: userIdentityUsernameSchemaAsset, bootstrapOnly: true},
+	{version: "202606220004", name: "bootstrap_user_identity_email", asset: userIdentityEmailSchemaAsset, bootstrapOnly: true},
+	{version: "202606220005", name: "bootstrap_user_identity_phone", asset: userIdentityPhoneSchemaAsset, bootstrapOnly: true},
+	{version: "202606220006", name: "bootstrap_user_identity_oauth", asset: userIdentityOAuthSchemaAsset, bootstrapOnly: true},
 }
 
 // DefaultMigrations 返回内置数据库迁移清单。

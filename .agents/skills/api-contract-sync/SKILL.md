@@ -12,7 +12,7 @@ description: "同步 Go 后端 API 契约。用于新增或修改 route、handle
 3. 路由变化时同步 RouteMeta、权限码、审计动作、公开或白名单原因、鉴权链和安全策略；未被源码触发的面不展开，只有常见风险面容易被误判时才记录不适用及依据。
 4. request/response 变化时同步 Go 类型、校验、接口示例、前端 wrapper、TypeScript 类型和用户可见 i18n。
 5. retry、timeout、batch、concurrency 和 pagination 字段同时维护服务端硬上限、前端输入约束和文档；前端限制不能替代后端校验。
-6. 业务错误使用独立业务码并补中英文消息；外部 message 不暴露 SQL、密钥、表名或真实下游错误。
+6. 客户端处理不同的业务分支使用可区分业务码并补中英文消息；抗账号枚举、验签/解密阶段探测按安全策略统一对外错误，内部脱敏记录原因；不得把统一安全拒绝拆成可探测的细分错误。
 7. 敏感契约保持 MFA、签名、加密、密钥版本、字段数量和大小限制一致；响应字段满足 `ResponseCipher ⊆ ResponseSign`。
 8. 认证契约变化时完整复核 JWT claim、会话 ID、`auth_version`、Redis 原子语义、会话上限、DDL 和存量迁移说明，不能只修改单个 handler。
 
@@ -20,7 +20,7 @@ description: "同步 Go 后端 API 契约。用于新增或修改 route、handle
 
 - route、middleware、handler、request/response 或业务码变化时，运行直接归属包测试及路由/契约防漂移测试，并覆盖成功、校验失败、鉴权失败和新业务码。
 - 只改变 TypeScript 类型或 API wrapper 时，读取前端仓库规则并运行真实 typecheck；改变页面字段、按钮、路由、权限可见性或交互时，再运行对应 lint 与浏览器冒烟。
-- 权限或安全字段变化时，补未登录、无权限、MFA/签名/加密失败、字段超限和公开/内网路由隔离测试；普通成功响应不能替代安全失败验证。
+- 权限或安全字段变化时，按实际路由和受影响机制补未登录、无权限、MFA/签名/加密失败、字段超限及公开/内网隔离测试；不能为凑齐清单引入未启用机制，也不能以成功响应替代失败验证。
 - 运行 `git diff --check`，检查文档链接、业务码/i18n 覆盖和仓库状态。
 
 ## 契约影响记录
@@ -45,7 +45,7 @@ description: "同步 Go 后端 API 契约。用于新增或修改 route、handle
 | --- | --- |
 | method、path、注册 server、route alias 或 middleware 变化 | 路由注册、RouteMeta、访问级别、权限、审计、公开/白名单依据、接口文档和路由测试 |
 | request、response、校验或 wrapper 变化 | Go 类型、字段来源与空值、服务端上限、响应包装、接口示例、前端 wrapper/type 和契约测试 |
-| HTTP 状态或业务错误变化 | 独立业务码、中文/英文消息、前端错误映射、日志脱敏和失败分支测试 |
+| HTTP 状态或业务错误变化 | 业务码区分或安全归并依据、中文/英文消息、前端错误映射、日志脱敏和失败分支测试 |
 | JWT/session、MFA、签名、加密或权限变化 | 安全策略、字段点路径与大小、密钥版本、nonce/重放、失败业务码、前端安全流程和安全测试 |
 | 前端页面、按钮、路由或可见性受影响 | API wrapper、TypeScript 类型、i18n、权限状态、typecheck；可见交互变化再补浏览器冒烟 |
 | Model、Redis、配置或运行时行为受影响 | 初始化 DDL/DML、被忽略的 DBA SQL 交付、Redis Key/失效、YAML、reload/restart、缓存或补偿步骤 |

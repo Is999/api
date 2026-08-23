@@ -9,8 +9,10 @@ User=api
 Group=api
 WorkingDirectory=/opt/api
 ExecStart=/opt/api/bin/api -f /etc/api/config.yaml
+# 启动、资源关闭或最终日志刷新失败均以非零退出码触发重启。
 Restart=on-failure
 RestartSec=5s
+# 给应用 20 秒清理预算及 29 秒最终强停期限留下编排余量。
 TimeoutStopSec=30s
 LimitNOFILE=65535
 NoNewPrivileges=true

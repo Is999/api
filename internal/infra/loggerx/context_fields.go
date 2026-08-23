@@ -20,6 +20,7 @@ func FieldsFromMeta(meta *requestctx.Meta) []logx.LogField {
 	if meta == nil {
 		return nil
 	}
+	// 原始 IP 和用户名不进入结构化字段，避免高基数身份信息扩散。
 	fields := make([]logx.LogField, 0, 24)
 	if meta.TraceID != "" {
 		fields = append(fields, logx.Field(fieldTraceID, meta.TraceID))
@@ -39,17 +40,12 @@ func FieldsFromMeta(meta *requestctx.Meta) []logx.LogField {
 	if meta.Locale != "" {
 		fields = append(fields, logx.Field(fieldLocale, meta.Locale))
 	}
-	if meta.ClientIP != "" {
-		fields = append(fields, logx.Field(fieldIP, meta.ClientIP))
-	}
 	if meta.UserID > 0 {
+		// user_id 用于统一检索，uid 保留业务日志常用的短字段。
 		fields = append(fields,
 			logx.Field(fieldUID, meta.UserID),
 			logx.Field(fieldUserID, meta.UserID),
 		)
-	}
-	if meta.UserName != "" {
-		fields = append(fields, logx.Field(fieldUserName, meta.UserName))
 	}
 	if meta.Node != "" {
 		fields = append(fields, logx.Field(fieldNode, meta.Node))
@@ -76,12 +72,14 @@ func FieldsFromMeta(meta *requestctx.Meta) []logx.LogField {
 		fields = append(fields, logx.Field(fieldWorkflowID, meta.WorkflowID))
 	}
 	if meta.WorkflowNode != "" {
+		// 工作流节点复用 node 维度，使任务日志按实际执行节点检索。
 		fields = append(fields,
 			logx.Field(fieldWorkflowNode, meta.WorkflowNode),
 			logx.Field(fieldNode, meta.WorkflowNode),
 		)
 	}
 	if meta.ShardTotal > 0 {
+		// shard 同时保留摘要和数值字段，兼顾检索与聚合。
 		shard := strconv.Itoa(meta.ShardIndex) + "/" + strconv.Itoa(meta.ShardTotal)
 		fields = append(fields,
 			logx.Field(fieldShard, shard),
@@ -97,6 +95,7 @@ func TraceAttributesFromMeta(meta *requestctx.Meta) []attribute.KeyValue {
 	if meta == nil {
 		return nil
 	}
+	// trace 同样排除原始 IP 和用户名，只保留稳定身份标识。
 	attrs := make([]attribute.KeyValue, 0, 28)
 	if meta.TraceID != "" {
 		attrs = append(attrs, attribute.String("app."+fieldTraceID, meta.TraceID))
@@ -106,6 +105,7 @@ func TraceAttributesFromMeta(meta *requestctx.Meta) []attribute.KeyValue {
 	}
 	route := strings.TrimSpace(meta.Route)
 	if route == "" {
+		// 未匹配稳定路由别名时退回实际路径，保证 span 仍可定位请求。
 		route = strings.TrimSpace(meta.Path)
 	}
 	if route != "" {
@@ -120,18 +120,13 @@ func TraceAttributesFromMeta(meta *requestctx.Meta) []attribute.KeyValue {
 	if meta.Locale != "" {
 		attrs = append(attrs, attribute.String("app."+fieldLocale, meta.Locale))
 	}
-	if meta.ClientIP != "" {
-		attrs = append(attrs, attribute.String("client.address", meta.ClientIP), attribute.String("app.client_ip", meta.ClientIP))
-	}
 	if meta.UserID > 0 {
+		// 同时写入 OpenTelemetry 语义属性和应用检索字段。
 		attrs = append(attrs,
 			attribute.String("enduser.id", strconv.FormatInt(meta.UserID, 10)),
 			attribute.Int64("app."+fieldUID, meta.UserID),
 			attribute.Int64("app."+fieldUserID, meta.UserID),
 		)
-	}
-	if meta.UserName != "" {
-		attrs = append(attrs, attribute.String("enduser.name", meta.UserName), attribute.String("app."+fieldUserName, meta.UserName))
 	}
 	if meta.Node != "" {
 		attrs = append(attrs, attribute.String("app."+fieldNode, meta.Node))
@@ -161,9 +156,11 @@ func TraceAttributesFromMeta(meta *requestctx.Meta) []attribute.KeyValue {
 		attrs = append(attrs, attribute.String("app."+fieldWorkflowID, meta.WorkflowID))
 	}
 	if meta.WorkflowNode != "" {
+		// 工作流节点复用 app.node 维度，与结构化日志保持一致。
 		attrs = append(attrs, attribute.String("app."+fieldWorkflowNode, meta.WorkflowNode), attribute.String("app."+fieldNode, meta.WorkflowNode))
 	}
 	if meta.ShardTotal > 0 {
+		// 分片摘要与索引、总数同时写入，避免单一维度失去上下文。
 		shard := strconv.Itoa(meta.ShardIndex) + "/" + strconv.Itoa(meta.ShardTotal)
 		attrs = append(attrs,
 			attribute.String("app."+fieldShard, shard),

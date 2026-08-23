@@ -146,7 +146,7 @@ func RecordSnowflakeLeaseEvent(namespace string, event string) {
 	idgenSnowflakeLeaseEventsTotal.WithLabelValues(metricLabel(namespace), metricLabel(event)).Inc()
 }
 
-// metricLabel 清洗指标标签，避免空值和过长高基数值进入指标。
+// metricLabel 替换空值和超长标签；不限制标签种类，调用方只能传固定业务枚举。
 func metricLabel(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {

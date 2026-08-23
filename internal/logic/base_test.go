@@ -14,6 +14,7 @@ import (
 // TestBaseLogicRedisHelpersScopeLogicalKeys 验证通用 Redis helper 会自动追加 app_id 前缀。
 func TestBaseLogicRedisHelpersScopeLogicalKeys(t *testing.T) {
 	useRuntimeAppID(t, "site-a")
+	// 单实例模拟只检查命名空间和 TTL 写入边界，不覆盖 Redis 集群行为。
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() {
@@ -22,6 +23,14 @@ func TestBaseLogicRedisHelpersScopeLogicalKeys(t *testing.T) {
 	})
 
 	logic := NewBaseLogicWithContext(context.Background(), svc.NewServiceContext(config.Config{AppID: "site-a"}, "v1", svc.Dependencies{Rds: client}))
+	for _, ttl := range []int64{0, -1, 1<<63 - 1} {
+		if err := logic.RdsSetJSONValue("demo:invalid", map[string]any{"id": 1}, ttl); err == nil {
+			t.Fatalf("RdsSetJSONValue(ttl=%d) error=nil，期望拒绝", ttl)
+		}
+	}
+	if server.Exists("app:site-a:demo:invalid") {
+		t.Fatal("非法 TTL 不应写入 Redis")
+	}
 	if err := logic.RdsSetJSONValue("demo:profile:1", map[string]any{"id": 1}, 60); err != nil {
 		t.Fatalf("RdsSetJSONValue() error = %v", err)
 	}

@@ -21,7 +21,7 @@ const (
 // Redis Key 模板集中维护，业务代码只能按模板精确读写。
 const (
 	// SnowflakeNodeLease 表示跨 api/admin 共享的雪花 node_id 租约 key 模板。
-	// Redis 类型：String(owner)，TTL 过期规则：按 snowflake.redis.lease_seconds 自动过期并由实例续约。
+	// Redis 类型：String(owner)，TTL 过期规则：运行期续约；正常停机刷新完整 TTL 后自然过期，期间禁止其它主机复用 node_id。
 	// 参数依次为部署级 scope、业务 namespace、node_id；该 key 不追加 app_id 前缀，确保同一业务统一互斥。
 	SnowflakeNodeLease = "snowflake:node:%s:%s:%d"
 
@@ -45,6 +45,11 @@ const (
 	// Redis 类型：String(uint64)，TTL 过期规则：有会话时与最晚会话同步，全量失效时覆盖 JWT 最长存活期。
 	// 参数为用户 ID；实际 Redis key 通过 WithPrefix 追加 app_id 前缀。
 	UserSessionAuthVersion = "user:session:auth_version:{%d}"
+
+	// UserSessionRevoked 标记主动退出或登录失败的 sid，防止并发补偿恢复已撤销会话。
+	// Redis 类型：String(1)，每个撤销 sid 一个键；TTL 过期规则：JWT 硬上限 30 天加 1 秒后自动回收，不计入八会话容量。
+	// 参数为用户 ID 和随机 sid；WithPrefix 追加 app_id，用户 hash tag 与会话 Lua 保持同槽。
+	UserSessionRevoked = "user:session:revoked:{%d}:%s"
 
 	// AuthRateLimitCount 表示认证入口限流计数键模板。
 	// Redis 类型：String，TTL 过期规则：按认证限流窗口 TTL 过期，登录成功后精确删除。

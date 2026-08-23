@@ -54,6 +54,7 @@ func WithMigrationLock(ctx context.Context, db *sql.DB, name string, wait time.D
 		return errors.Tag(err)
 	}
 	defer func() {
+		// 请求取消不能跳过解锁，但清理仍限定 5 秒，防止 CLI 退出无限等待。
 		releaseCtx, cancel := context.WithTimeout(context.Background(), migrationLockReleaseTimeout)
 		defer cancel()
 		if releaseErr := lock.release(releaseCtx); releaseErr != nil {
@@ -73,6 +74,7 @@ func acquireMigrationLock(ctx context.Context, db *sql.DB, name string, wait tim
 	if err != nil {
 		return nil, errors.Wrap(err, "获取数据库迁移独占连接失败")
 	}
+	// GET_LOCK 使用整数秒，正的小数等待向上取整，负值按不等待处理。
 	waitSeconds := int64(math.Ceil(wait.Seconds()))
 	if waitSeconds < 0 {
 		waitSeconds = 0
@@ -99,6 +101,7 @@ func (l *migrationLock) release(ctx context.Context) error {
 	query := embedasset.StripLeadingLineComments(migrationLockReleaseSQL, "--")
 	var released sql.NullInt64
 	if err := l.conn.QueryRowContext(ctx, query, l.name).Scan(&released); err != nil {
+		// 解锁结果未知时废弃物理连接，不能把可能仍持锁的会话归还连接池。
 		_ = l.conn.Raw(func(any) error { return driver.ErrBadConn })
 		return errors.Wrap(err, "释放数据库迁移锁失败")
 	}

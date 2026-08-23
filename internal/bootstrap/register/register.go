@@ -1,6 +1,8 @@
 package register
 
 import (
+	"strings"
+
 	"api/internal/handler"
 
 	"github.com/Is999/go-utils/errors"
@@ -47,8 +49,8 @@ func NewItem(kind string, spec Spec) Item {
 func ValidateNamesUnique(kind string, names []string) error {
 	seen := make(map[string]struct{}, len(names))
 	for _, name := range names {
-		if name == "" {
-			return errors.Errorf("注册集合[%s]存在空名称", kind)
+		if name == "" || name != strings.TrimSpace(name) {
+			return errors.Errorf("注册集合[%s]存在空名称或名称包含首尾空白", kind)
 		}
 		if _, ok := seen[name]; ok {
 			return errors.Errorf("注册集合[%s]存在重复名称: %s", kind, name)
@@ -63,6 +65,7 @@ func RouteModuleNames(items []handler.RouteModule) []string {
 	names := make([]string, 0, len(items))
 	for _, item := range items {
 		if item == nil {
+			names = append(names, "")
 			continue
 		}
 		names = append(names, item.Name())

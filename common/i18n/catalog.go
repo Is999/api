@@ -4,7 +4,8 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 
 	"github.com/Is999/go-utils/errors"
 	goi18n "github.com/nicksnyder/go-i18n/v2/i18n"
@@ -28,6 +29,7 @@ var (
 
 // loadMessageState 加载并注册固定语言资产；失败时保留非空兜底对象并把错误交给启动链返回。
 func loadMessageState() (map[string]localeMessageCatalog, *goi18n.Bundle, error) {
+	// 资产损坏时错误响应仍能访问非空对象，启动入口随后统一拒绝运行。
 	fallbackCatalog := make(map[string]localeMessageCatalog, len(supportedLocales))
 	for _, locale := range supportedLocales {
 		fallbackCatalog[locale] = localeMessageCatalog{}
@@ -72,11 +74,8 @@ func buildMessageBundle(catalog map[string]localeMessageCatalog) (*goi18n.Bundle
 	bundle := goi18n.NewBundle(language.SimplifiedChinese)
 	for _, locale := range supportedLocales {
 		messages := catalog[locale]
-		ids := make([]string, 0, len(messages))
-		for id := range messages {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
+		// JSON map 无序，固定注册顺序使资产错误定位不随进程变化。
+		ids := slices.Sorted(maps.Keys(messages))
 
 		items := make([]*goi18n.Message, 0, len(ids))
 		for _, id := range ids {

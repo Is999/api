@@ -15,6 +15,8 @@ import (
 	"api/internal/config"
 	"api/internal/handler"
 	"api/internal/infra/loggerx"
+	authlogic "api/internal/logic/auth"
+	"api/internal/security"
 	"api/internal/svc"
 
 	"github.com/Is999/go-utils/errors"
@@ -40,8 +42,8 @@ type App struct {
 	internalHTTP   *httpServerRun              // 内网监听器运行态，用于启动探测和局部失败关闭
 }
 
-// New 负责把依赖装配与 HTTP 服务注册串起来。
-func New(ctx context.Context, c config.Config, version string) (*App, error) {
+// New 使用同轮配置校验生成的密钥快照完成依赖装配和 HTTP 服务注册。
+func New(ctx context.Context, c config.Config, version string, securityKeys *security.KeyRegistry) (*App, error) {
 	if err := i18n.ValidateCatalog(); err != nil {
 		return nil, errors.Wrap(err, "校验内嵌多语言资产失败")
 	}
@@ -49,44 +51,42 @@ func New(ctx context.Context, c config.Config, version string) (*App, error) {
 	if err != nil {
 		return nil, errors.Tag(err)
 	}
+	// 指标在资源和监听器创建前注册，冲突时直接拒绝启动。
 	if err := idgen.RegisterMetrics(); err != nil {
 		runtimeAlerts.notify(context.Background(), appalert.LifecycleFailure("start", "metrics_registry", err))
 		return nil, errors.Wrap(err, "注册 ID 生成指标失败")
 	}
-	svcCtx, shutdown, err := BuildServiceContext(ctx, c, version)
+	if err := authlogic.RegisterMetrics(); err != nil {
+		runtimeAlerts.notify(context.Background(), appalert.LifecycleFailure("start", "metrics_registry", err))
+		return nil, errors.Wrap(err, "注册认证运行指标失败")
+	}
+	// 基础设施创建成功后，后续装配失败由本方法负责回收。
+	svcCtx, shutdown, err := BuildServiceContext(ctx, c, version, securityKeys)
 	if err != nil {
 		runtimeAlerts.notify(context.Background(), appalert.LifecycleFailure("start", "build_service_context", err))
 		return nil, errors.Tag(err)
 	}
+	// 路由名称在监听器创建前完成去重，避免部分路由生效。
 	routeModules := handler.BuiltinRouteModules()
 	if err := register.ValidateNamesUnique(register.KindRoute, register.RouteModuleNames(routeModules)); err != nil {
 		runtimeAlerts.notify(context.Background(), appalert.LifecycleFailure("start", "route_registry", err))
-		_ = bootstrapresources.CloseServiceContextResources(ctx, svcCtx)
-		if shutdown != nil {
-			_ = shutdown(context.Background())
-		}
-		return nil, errors.Tag(err)
+		return nil, errors.Join(errors.Tag(err), cleanupServiceContextAfterStartFailure(ctx, svcCtx, shutdown))
 	}
 
 	restConf := c.RestConf
 	// 项目已接入自定义 access log 中间件，关闭 go-zero 默认 HTTP 日志。
 	restConf.Middlewares.Log = false
+	// 项目 Trace 统一继承 W3C 或 X-Trace-Id，避免框架提前创建不同链路。
+	restConf.Middlewares.Trace = false
 	server, err := rest.NewServer(restConf)
 	if err != nil {
 		runtimeAlerts.notify(context.Background(), appalert.LifecycleFailure("start", "http_server", err))
-		_ = bootstrapresources.CloseServiceContextResources(ctx, svcCtx)
-		if shutdown != nil {
-			_ = shutdown(context.Background())
-		}
-		return nil, errors.Wrapf(err, "创建 HTTP 服务失败 host=%s port=%d", restConf.Host, restConf.Port)
+		startErr := errors.Wrapf(err, "创建 HTTP 服务失败 host=%s port=%d", restConf.Host, restConf.Port)
+		return nil, errors.Join(startErr, cleanupServiceContextAfterStartFailure(ctx, svcCtx, shutdown))
 	}
 	internalServer, err := newInternalServer(c)
 	if err != nil {
-		_ = bootstrapresources.CloseServiceContextResources(ctx, svcCtx)
-		if shutdown != nil {
-			_ = shutdown(context.Background())
-		}
-		return nil, errors.Tag(err)
+		return nil, errors.Join(errors.Tag(err), cleanupServiceContextAfterStartFailure(ctx, svcCtx, shutdown))
 	}
 	app := &App{
 		Server:         server,
@@ -99,21 +99,16 @@ func New(ctx context.Context, c config.Config, version string) (*App, error) {
 	}
 	svcCtx.ConfigReload = app
 	app.bindCollectorRuntimeAlerts()
+	// 公网和内网路由必须在 Start 前全部注册成功。
 	if err := handler.RegisterPublicHandlersWithModules(server, svcCtx, routeModules...); err != nil {
 		runtimeAlerts.notify(context.Background(), appalert.LifecycleFailure("start", "route_registry", err))
-		_ = bootstrapresources.CloseServiceContextResources(ctx, svcCtx)
-		if shutdown != nil {
-			_ = shutdown(context.Background())
-		}
-		return nil, errors.Wrap(err, "注册公网 HTTP 路由失败")
+		startErr := errors.Wrap(err, "注册公网 HTTP 路由失败")
+		return nil, errors.Join(startErr, cleanupServiceContextAfterStartFailure(ctx, svcCtx, shutdown))
 	}
 	if err := handler.RegisterInternalHandlersWithModules(internalServer, svcCtx, routeModules...); err != nil {
 		runtimeAlerts.notify(context.Background(), appalert.LifecycleFailure("start", "route_registry", err))
-		_ = bootstrapresources.CloseServiceContextResources(ctx, svcCtx)
-		if shutdown != nil {
-			_ = shutdown(context.Background())
-		}
-		return nil, errors.Wrap(err, "注册内网 HTTP 路由失败")
+		startErr := errors.Wrap(err, "注册内网 HTTP 路由失败")
+		return nil, errors.Join(startErr, cleanupServiceContextAfterStartFailure(ctx, svcCtx, shutdown))
 	}
 	return app, nil
 }
@@ -127,6 +122,7 @@ func (a *App) Start() error {
 		}
 		return err
 	}
+	// watcher 必须在阻塞式 HTTP 启动前创建。
 	a.startConfigHotReload()
 	cfg := a.ServiceContext.CurrentConfig()
 	loggerx.Infow(context.Background(), "应用 HTTP 服务开始监听",
@@ -136,6 +132,7 @@ func (a *App) Start() error {
 		logx.Field("mode", cfg.Mode),
 		logx.Field("version", a.ServiceContext.CurrentVersion()),
 	)
+	// 任一监听器退出时统一排空并关闭同组监听器。
 	err := runHTTPServers([]*httpServerRun{a.internalHTTP, a.publicHTTP}, httpDrainTimeout)
 	if err != nil {
 		a.notifyLifecycleFailure(context.Background(), "start", "http_server", err)
@@ -168,21 +165,20 @@ func (a *App) Stop(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	var firstErr error
+	// 清理继续执行全部阶段，只返回第一处错误。
 	recordErr := func(err error) {
 		if err != nil && firstErr == nil {
 			firstErr = errors.Tag(err)
 		}
 	}
+	// 先停止接收请求并排空在途流量。
 	recordErr(shutdownHTTPServers(ctx, a.publicHTTP, a.internalHTTP))
-	if a.Server != nil {
-		a.Server.Stop()
-	}
-	if a.InternalServer != nil {
-		a.InternalServer.Stop()
-	}
+	// watcher 停止后不再发布新的配置快照。
 	recordErr(a.stopConfigHotReload(ctx))
+	// 请求与 watcher 退出后再关闭业务资源。
 	recordErr(bootstrapresources.CloseServiceContextResources(ctx, a.ServiceContext))
 	if a.shutdown != nil {
+		// tracing 最后关闭，保留资源清理阶段的观测能力。
 		recordErr(a.shutdown(ctx))
 	}
 	if firstErr != nil {

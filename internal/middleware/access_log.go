@@ -30,6 +30,7 @@ func (m *AccessLogMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		begin := time.Now()
+		// handler 返回后再读取最终状态，避免提前记录尚未写出的响应。
 		defer func() {
 			ctx := r.Context()
 			requestctx.SetLatency(ctx, time.Since(begin))
@@ -37,10 +38,12 @@ func (m *AccessLogMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 			if meta == nil {
 				return
 			}
+			// 元数据未记录最终状态时，以实际 ResponseWriter 结果补齐。
 			if meta.HTTPStatus == 0 || meta.HTTPStatus == http.StatusOK {
 				requestctx.SetResponse(ctx, recorder.status, meta.BizCode, meta.BizMessage, meta.ErrorMessage)
 			}
 			success := meta.ErrorMessage == "" && recorder.status < http.StatusBadRequest
+			// 路由可跳过普通日志，但仍需更新 trace 状态。
 			if !shouldSkipAccessLog(meta) {
 				fields := []logx.LogField{
 					logx.Field("http_status", recorder.status),
@@ -55,6 +58,7 @@ func (m *AccessLogMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 						logx.Field("error", meta.ErrorMessage),
 					)
 					if meta.ErrorCause == nil {
+						// 缺少错误对象时用文本补齐 error_chain，保持日志字段稳定。
 						fields = append(fields, logx.Field("error_chain", strings.TrimSpace(meta.ErrorMessage)))
 					}
 				}
@@ -71,6 +75,7 @@ func (m *AccessLogMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 					attribute.Bool("app.success", success),
 				)
 				span.SetAttributes(attrs...)
+				// HTTP 或业务失败均标记 span，使日志与 trace 使用同一结果。
 				if meta.ErrorMessage != "" || recorder.status >= http.StatusBadRequest {
 					errMsg := meta.ErrorMessage
 					if errMsg == "" {
@@ -114,7 +119,6 @@ func accessLogMessage(meta *requestctx.Meta, httpStatus int, success bool) strin
 		parts = append(parts, fmt.Sprintf("uid=%d", meta.UserID))
 	}
 	parts = appendAccessTextKV(parts, "node", meta.Node)
-	parts = appendAccessTextKV(parts, "ip", meta.ClientIP)
 	return strings.Join(parts, " ")
 }
 

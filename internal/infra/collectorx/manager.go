@@ -9,10 +9,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"api/common/secureid"
 	"api/internal/config"
 
 	"github.com/Is999/go-utils/errors"
-	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -53,7 +53,9 @@ type Manager struct {
 
 // New 创建通用收集器 Kafka 投递管理器。
 func New(cfg config.CollectorConfig) (*Manager, error) {
-	normalizeCollectorConfig(&cfg)
+	if err := validateCollectorRuntimeConfig(cfg); err != nil {
+		return nil, errors.Tag(err)
+	}
 	if err := RegisterMetrics(); err != nil {
 		return nil, errors.Wrap(err, "注册 Collector 指标失败")
 	}
@@ -61,9 +63,11 @@ func New(cfg config.CollectorConfig) (*Manager, error) {
 		cfg:     cfg,
 		writers: make(map[string]kafkaMessageWriter),
 	}
+	// 未启用时保留空管理器，生命周期调用无需额外分支。
 	if !cfg.Enabled || len(cfg.Kafka.Brokers) == 0 {
 		return m, nil
 	}
+	// 每个唯一 Topic 只创建一个同步 writer，消息返回前必须取得 broker ACK。
 	for _, topic := range collectorConfiguredTopics(cfg) {
 		m.writers[topic] = &kafka.Writer{
 			Addr:         kafka.TCP(cfg.Kafka.Brokers...),
@@ -77,6 +81,60 @@ func New(cfg config.CollectorConfig) (*Manager, error) {
 		}
 	}
 	return m, nil
+}
+
+// validateCollectorRuntimeConfig 保留 infra 入口防线，防止绕过 bootstrap 时无界创建 Kafka Writer。
+func validateCollectorRuntimeConfig(cfg config.CollectorConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if len(cfg.Kafka.Brokers) == 0 {
+		return errors.Errorf("collector kafka brokers 未配置")
+	}
+	// broker 原值必须唯一，避免同一地址重复进入 Kafka 客户端。
+	brokers := make(map[string]struct{}, len(cfg.Kafka.Brokers))
+	for index, broker := range cfg.Kafka.Brokers {
+		if broker == "" || strings.TrimSpace(broker) != broker {
+			return errors.Errorf("collector kafka brokers[%d] 不能为空或包含首尾空白", index)
+		}
+		if _, exists := brokers[broker]; exists {
+			return errors.Errorf("collector kafka brokers 存在重复地址 %s", broker)
+		}
+		brokers[broker] = struct{}{}
+	}
+	// 单批消息数先限制在上限内，零值由 writer 构造阶段填默认值。
+	if cfg.Kafka.WriteBatchSize < 0 || cfg.Kafka.WriteBatchSize > maxKafkaWriteBatchSize {
+		return errors.Errorf("collector kafka write batch size 必须在 0-%d 之间", maxKafkaWriteBatchSize)
+	}
+	// 原始毫秒值先校验，避免换算 Duration 时溢出绕过上限。
+	if cfg.Kafka.WriteBatchWaitMilliseconds < 0 || cfg.Kafka.WriteBatchWaitMilliseconds > int(maxKafkaWriteBatchWait/time.Millisecond) {
+		return errors.Errorf("collector kafka write batch wait 必须在 0-%d 毫秒之间", maxKafkaWriteBatchWait/time.Millisecond)
+	}
+	// 原始秒数同样先校验，构造 writer 时再换算为 Duration。
+	if cfg.Kafka.WriteTimeout < 0 || cfg.Kafka.WriteTimeout > int(maxKafkaWriteTimeout/time.Second) {
+		return errors.Errorf("collector kafka write timeout 必须在 0-%d 秒之间", maxKafkaWriteTimeout/time.Second)
+	}
+	if len(cfg.Tasks) == 0 {
+		return errors.Errorf("collector tasks 未配置")
+	}
+	if len(cfg.Tasks) > config.MaxCollectorTaskCount {
+		return errors.Errorf("collector tasks 不能超过 %d 个", config.MaxCollectorTaskCount)
+	}
+	// 多个业务可共用 Topic，writer 数量按去重后的 Topic 控制。
+	topics := make(map[string]struct{}, len(cfg.Tasks))
+	for bizType, task := range cfg.Tasks {
+		if bizType == "" || strings.TrimSpace(bizType) != bizType {
+			return errors.Errorf("collector task bizType 不能为空或包含首尾空白")
+		}
+		if task.Topic == "" || strings.TrimSpace(task.Topic) != task.Topic {
+			return errors.Errorf("collector task topic 不能为空或包含首尾空白 bizType=%s", bizType)
+		}
+		topics[task.Topic] = struct{}{}
+	}
+	if len(topics) > config.MaxCollectorTopicCount {
+		return errors.Errorf("collector 不同 topic 不能超过 %d 个", config.MaxCollectorTopicCount)
+	}
+	return nil
 }
 
 // SetAlertHook 设置 Collector 运行异常告警钩子。
@@ -107,11 +165,8 @@ func pingKafkaBrokers(ctx context.Context, brokers []string, topics []string) er
 	}
 	var lastErr error
 	dialer := &kafka.Dialer{Timeout: time.Second}
+	// 任一 broker 能返回全部 Topic 分区即视为集群就绪。
 	for _, broker := range brokers {
-		broker = strings.TrimSpace(broker)
-		if broker == "" {
-			continue
-		}
 		brokerReady := true
 		for _, topic := range topics {
 			partitions, err := dialer.LookupPartitions(ctx, "tcp", broker, topic)
@@ -146,14 +201,16 @@ func (m *Manager) Enqueue(ctx context.Context, event Event) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := normalizeAndValidateEvent(&event); err != nil {
+	// 校验会补齐事件 ID 和空负载，后续步骤使用同一份事件快照。
+	if err := validateEvent(&event); err != nil {
 		recordKafkaPublish("failed")
 		return "", errors.Tag(err)
 	}
 	topic := m.collectorTaskTopic(event.BizType)
-	if strings.TrimSpace(topic) == "" {
+	if topic == "" {
 		err := errors.Errorf("collector task topic 未配置 biz_type=%s", event.BizType)
 		recordKafkaPublish("failed")
+		// 路由缺失属于运行配置漂移，返回错误的同时触发 P1 告警。
 		m.reportRuntimeAlert(ctx, RuntimeAlert{
 			Kind:      RuntimeAlertKindEnqueueFailed,
 			Title:     "【P1 Collector 投递失败】",
@@ -174,10 +231,12 @@ func (m *Manager) Enqueue(ctx context.Context, event Event) (string, error) {
 		recordKafkaPublish("failed")
 		return "", errors.Tag(err)
 	}
+	// 完整信封包含协议字段，序列化后再次执行 Kafka 消息上限。
 	if len(body) > maxCollectorKafkaMessageBytes {
 		recordKafkaPublish("failed")
 		return "", errors.Errorf("collector Kafka 消息不能超过 %d 字节", maxCollectorKafkaMessageBytes)
 	}
+	// broker 写入失败同时计入指标并告警，错误仍交由调用方处理。
 	if err = m.publishKafka(ctx, topic, kafkaMessageKey(event), body); err != nil {
 		recordKafkaPublish("failed")
 		m.reportRuntimeAlert(ctx, RuntimeAlert{
@@ -222,14 +281,13 @@ func closeAllWithContext(ctx context.Context, closeFns []func() error) error {
 	if len(closeFns) == 0 {
 		return nil
 	}
+	// 缓冲全部结果，截止时间先到时后台关闭不会阻塞在回传错误。
 	errs := make(chan error, len(closeFns))
 	var wg sync.WaitGroup
-	wg.Add(len(closeFns))
 	for _, closeFn := range closeFns {
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs <- closeFn()
-		}()
+		})
 	}
 	done := make(chan struct{})
 	go func() {
@@ -246,13 +304,14 @@ func closeAllWithContext(ctx context.Context, closeFns []func() error) error {
 		}
 		return nil
 	case <-ctx.Done():
+		// 上游 Close 没有 context 接口；这里只结束等待，后台仍接收各 writer 的关闭结果。
 		return errors.Tag(ctx.Err())
 	}
 }
 
 // publishKafka 将事件写入 Kafka，并等待 broker ACK。
 func (m *Manager) publishKafka(ctx context.Context, topic string, key string, body []byte) error {
-	writer := m.writers[strings.TrimSpace(topic)]
+	writer := m.writers[topic]
 	if writer == nil {
 		return errors.Errorf("collector kafka topic 未配置 topic=%s", topic)
 	}
@@ -266,15 +325,14 @@ func (m *Manager) collectorTaskTopic(bizType string) string {
 	if m == nil {
 		return ""
 	}
-	bizType = strings.TrimSpace(bizType)
 	task, ok := m.cfg.Tasks[bizType]
 	if !ok {
 		return ""
 	}
-	return strings.TrimSpace(task.Topic)
+	return task.Topic
 }
 
-// reportRuntimeAlert 上报 Collector 运行异常；未设置 hook 时保持原返回语义。
+// reportRuntimeAlert 通过可选 hook 上报 Collector 运行异常。
 func (m *Manager) reportRuntimeAlert(ctx context.Context, alert RuntimeAlert) {
 	if m == nil {
 		return
@@ -288,6 +346,7 @@ func (m *Manager) reportRuntimeAlert(ctx context.Context, alert RuntimeAlert) {
 	if alert.OccurredAt.IsZero() {
 		alert.OccurredAt = time.Now()
 	}
+	// hook 在读锁外执行，避免告警 I/O 阻塞运行期重新绑定。
 	hook(ctx, normalizeRuntimeAlert(alert))
 }
 
@@ -344,31 +403,39 @@ func collectorAlertUniqueKey(kind, bizType, channel string) string {
 
 // kafkaMessageKey 返回 Kafka 分区键，保证同任务同业务分区稳定进入同一 Kafka partition。
 func kafkaMessageKey(event Event) string {
-	bizType := strings.TrimSpace(event.BizType)
-	partitionKey := strings.TrimSpace(event.PartitionKey)
-	if partitionKey == "" {
-		return bizType
+	if event.PartitionKey == "" {
+		return event.BizType
 	}
-	return bizType + ":" + partitionKey
+	return event.BizType + ":" + event.PartitionKey
 }
 
-// normalizeAndValidateEvent 按 Admin 消费契约清洗并校验事件。
-func normalizeAndValidateEvent(event *Event) error {
+// validateEvent 校验 Admin 消费契约，除空 eventId 外不改写调用方字段。
+func validateEvent(event *Event) error {
 	if event == nil {
 		return errors.Errorf("collector event 为空")
 	}
-	event.EventID = strings.TrimSpace(event.EventID)
 	if event.EventID == "" {
-		event.EventID = strings.ReplaceAll(uuid.NewString(), "-", "")
+		// 空 eventId 使用加密随机值，避免并发生产者发生碰撞。
+		generatedID, err := secureid.NewHex(16)
+		if err != nil {
+			return errors.Wrap(err, "生成 collector eventId 失败")
+		}
+		event.EventID = generatedID
 	}
-	event.BizType = strings.TrimSpace(event.BizType)
-	event.PartitionKey = strings.TrimSpace(event.PartitionKey)
+	if event.EventID != strings.TrimSpace(event.EventID) {
+		return errors.Errorf("collector event eventId 不能包含首尾空白")
+	}
+	if event.BizType == "" || event.BizType != strings.TrimSpace(event.BizType) {
+		return errors.Errorf("collector event bizType 不能为空或包含首尾空白")
+	}
+	if event.PartitionKey != strings.TrimSpace(event.PartitionKey) {
+		return errors.Errorf("collector event partitionKey 不能包含首尾空白")
+	}
 	if len(event.Payload) == 0 {
+		// 空负载统一为 JSON null，保证下游始终收到合法 JSON。
 		event.Payload = json.RawMessage("null")
 	}
-	if event.BizType == "" {
-		return errors.Errorf("collector event bizType 为空")
-	}
+	// 文本长度按 UTF-8 字节计数，与 Kafka 编码限制使用同一口径。
 	if !utf8.ValidString(event.EventID) {
 		return errors.Errorf("collector event eventId 不是有效 UTF-8")
 	}
@@ -387,6 +454,7 @@ func normalizeAndValidateEvent(event *Event) error {
 	if len(event.PartitionKey) > maxCollectorPartitionKeyBytes {
 		return errors.Errorf("collector event partitionKey 不能超过 %d 字节", maxCollectorPartitionKeyBytes)
 	}
+	// 负载先校验独立上限，完整信封仍会在发送前复核。
 	if len(event.Payload) > maxCollectorPayloadBytes {
 		return errors.Errorf("collector event payload 不能超过 %d 字节", maxCollectorPayloadBytes)
 	}
@@ -399,36 +467,11 @@ func normalizeAndValidateEvent(event *Event) error {
 	return nil
 }
 
-// normalizeCollectorConfig 清理 Kafka broker 和任务路由字段。
-func normalizeCollectorConfig(cfg *config.CollectorConfig) {
-	if cfg == nil {
-		return
-	}
-	cfg.Kafka.Brokers = nonEmptyStrings(cfg.Kafka.Brokers)
-	if len(cfg.Tasks) == 0 {
-		return
-	}
-	tasks := make(map[string]config.CollectorTaskConfig, len(cfg.Tasks))
-	for bizType, task := range cfg.Tasks {
-		bizType = strings.TrimSpace(bizType)
-		task.Topic = strings.TrimSpace(task.Topic)
-		if bizType == "" {
-			continue
-		}
-		tasks[bizType] = task
-	}
-	cfg.Tasks = tasks
-}
-
 // collectorConfiguredTopics 返回 Collector 当前配置需要写入的 Topic 列表。
 func collectorConfiguredTopics(cfg config.CollectorConfig) []string {
 	topics := make(map[string]struct{})
 	for _, task := range cfg.Tasks {
-		topic := strings.TrimSpace(task.Topic)
-		if topic == "" {
-			continue
-		}
-		topics[topic] = struct{}{}
+		topics[task.Topic] = struct{}{}
 	}
 	return sortedKeys(topics)
 }
@@ -466,18 +509,6 @@ func boundedPositiveInt(value int, fallback int, maxValue int) int {
 		return maxValue
 	}
 	return value
-}
-
-// nonEmptyStrings 返回去掉空白后的字符串列表。
-func nonEmptyStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			out = append(out, value)
-		}
-	}
-	return out
 }
 
 // sortedKeys 返回 map key 的稳定排序结果。

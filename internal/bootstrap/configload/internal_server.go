@@ -34,7 +34,7 @@ func validateInternalServer(public rest.RestConf, internal config.InternalServer
 	if err != nil {
 		return errors.Tag(err)
 	}
-	if productionMode(mode) {
+	if config.IsProductionMode(mode) {
 		if addr.IsUnspecified() {
 			return errors.Errorf("生产环境 internal_server.host 不能使用通配监听地址")
 		}
@@ -48,12 +48,15 @@ func validateInternalServer(public rest.RestConf, internal config.InternalServer
 // internalServerTLSEnabled 校验 mTLS 三个文件必须同时配置。
 func internalServerTLSEnabled(cfg config.InternalServerConfig) (bool, error) {
 	files := []string{
-		strings.TrimSpace(cfg.CertFile),
-		strings.TrimSpace(cfg.KeyFile),
-		strings.TrimSpace(cfg.ClientCAFile),
+		cfg.CertFile,
+		cfg.KeyFile,
+		cfg.ClientCAFile,
 	}
 	configured := 0
-	for _, file := range files {
+	for index, file := range files {
+		if file != strings.TrimSpace(file) {
+			return false, errors.Errorf("internal_server TLS 文件路径[%d]不能包含首尾空白", index)
+		}
 		if file != "" {
 			configured++
 		}
@@ -62,14 +65,4 @@ func internalServerTLSEnabled(cfg config.InternalServerConfig) (bool, error) {
 		return false, errors.Errorf("internal_server.cert_file、key_file、client_ca_file 必须同时配置")
 	}
 	return configured == len(files), nil
-}
-
-// productionMode 判断配置是否属于生产运行模式。
-func productionMode(mode string) bool {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "pro", "prod", "production":
-		return true
-	default:
-		return false
-	}
 }

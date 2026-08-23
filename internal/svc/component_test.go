@@ -10,8 +10,11 @@ import (
 
 // TestNewComponentRegistryRejectsDuplicate 确保组件名称重复会被拦截。
 func TestNewComponentRegistryRejectsDuplicate(t *testing.T) {
-	if _, err := NewComponentRegistry(Component{Name: "mysql"}, Component{Name: " mysql "}); err == nil {
+	if _, err := NewComponentRegistry(Component{Name: "mysql"}, Component{Name: "mysql"}); err == nil {
 		t.Fatal("expected duplicate component name error")
+	}
+	if _, err := NewComponentRegistry(Component{Name: " mysql "}); err == nil {
+		t.Fatal("expected non-canonical component name error")
 	}
 }
 

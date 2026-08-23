@@ -7,8 +7,9 @@ import (
 	drivermysql "github.com/go-sql-driver/mysql"
 )
 
-// TestIsMySQLDuplicateEntryErrorDetectsWrappedDuplicate 验证对应场景符合预期。
+// TestIsMySQLDuplicateEntryErrorDetectsWrappedDuplicate 确保包装后的 1062 错误仍可识别且不会误判死锁。
 func TestIsMySQLDuplicateEntryErrorDetectsWrappedDuplicate(t *testing.T) {
+	// 直接构造驱动错误以验证错误链识别，不实际触发数据库唯一索引冲突。
 	duplicateErr := &drivermysql.MySQLError{Number: mysqlDuplicateEntryErrorNumber, Message: "Duplicate entry"}
 	if !IsMySQLDuplicateEntryError(errors.Wrap(duplicateErr, "create user")) {
 		t.Fatal("期望识别被包装的 MySQL duplicate entry 错误")

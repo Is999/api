@@ -22,6 +22,7 @@ func MessageByCode(code int, locale string) string {
 func MessageByKey(key, locale string, args ...any) string {
 	normalizedLocale := NormalizeLocale(locale)
 	defaultText := defaultMessage(key)
+	// 未登记 key 保留原标识，便于定位未同步的语言资产。
 	if defaultText == "" {
 		return key
 	}
@@ -33,10 +34,12 @@ func MessageByKey(key, locale string, args ...any) string {
 		},
 	}
 	if len(args) > 0 {
+		// 位置参数只提供给模板，普通文案不会拼接内部错误上下文。
 		cfg.TemplateData = templateData(args)
 	}
 	text, err := goi18n.NewLocalizer(messageBundle, normalizedLocale, LocaleZHCN).Localize(cfg)
 	if err != nil {
+		// 模板错误返回原 key，不把解析细节写入外部响应。
 		return key
 	}
 	return text

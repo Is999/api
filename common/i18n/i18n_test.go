@@ -22,8 +22,8 @@ func TestMessageByCodeUsesLocale(t *testing.T) {
 	if got := MessageByCode(codes.TokenExpired, LocaleZHCN); !strings.Contains(got, "过期") {
 		t.Fatalf("MessageByCode(TokenExpired,zh-CN)=%q, want 中文过期文案", got)
 	}
-	if got := MessageByCode(codes.SecuritySignatureFailed, LocaleENUS); !strings.Contains(strings.ToLower(got), "signature") {
-		t.Fatalf("MessageByCode(SecuritySignatureFailed,en-US)=%q, want signature text", got)
+	if got := MessageByCode(codes.SecurityRequestRejected, LocaleENUS); !strings.Contains(strings.ToLower(got), "security") {
+		t.Fatalf("MessageByCode(SecurityRequestRejected,en-US)=%q, want security text", got)
 	}
 	if got := MessageByCode(codes.SecurityPayloadTooLarge, LocaleZHCN); !strings.Contains(got, "限制") {
 		t.Fatalf("MessageByCode(SecurityPayloadTooLarge,zh-CN)=%q, want 中文限制文案", got)

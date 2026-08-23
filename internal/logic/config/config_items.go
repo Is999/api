@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +50,7 @@ var (
 
 // ConfigReloadItems 查询当前 API 进程内已经生效的运行态配置快照。
 func (l *SystemLogic) ConfigReloadItems(req *types.ConfigItemQueryReq) *types.BizResult {
+	// 查询参数先完成边界校验，避免无效分页触发快照构建。
 	if l.Svc == nil {
 		return types.NewBizResult(codes.InternalError).
 			SetI18nMessage(i18n.MsgKeyInternalError).
@@ -61,6 +63,7 @@ func (l *SystemLogic) ConfigReloadItems(req *types.ConfigItemQueryReq) *types.Bi
 		return types.ParamErrorResult(err)
 	}
 
+	// 完整配置只在内存中构建脱敏视图和运行期 YAML，不回读配置文件。
 	currentConfig := l.Svc.CurrentConfig()
 	view, err := buildMaskedConfigView(currentConfig)
 	if err != nil {
@@ -70,10 +73,12 @@ func (l *SystemLogic) ConfigReloadItems(req *types.ConfigItemQueryReq) *types.Bi
 	if err != nil {
 		return types.ServerError(i18n.MsgKeyInternalError, err, "SystemLogic.ConfigReloadItems.runtime").ToBizResult()
 	}
+	// 过滤后再分页，返回总数与当前页始终基于同一快照。
 	filtered := filterConfigItems(view.items, req.Keyword, req.SensitiveOnly)
 	pageItems := paginateConfigItems(filtered, req.Page, req.PageSize)
 	status := l.Svc.CurrentHotReloadStatus()
 
+	// 来源元数据取最近热加载状态；待重启配置不会替换上方进程内的实际生效值。
 	return types.NewBizResult(codes.FetchSuccess).
 		SetI18nMessage(i18n.MsgKeyFetchSuccess).
 		WithData(&types.ConfigItemQueryResp{
@@ -105,24 +110,19 @@ func (l *SystemLogic) ConfigReloadItems(req *types.ConfigItemQueryReq) *types.Bi
 
 // buildMaskedConfigView 将配置结构按 json tag 转为稳定的扁平路径和脱敏 YAML 快照。
 func buildMaskedConfigView(cfg appconfig.Config) (*maskedConfigView, error) {
-	payload, err := json.Marshal(cfg)
+	// 与局部配置视图共用 JSON tag 和数字精度规则，不另外维护一套转换。
+	root, err := decodeConfigJSONValue(cfg)
 	if err != nil {
-		return nil, errors.Wrap(err, "序列化运行态配置失败")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.UseNumber()
-
-	var root any
-	if err = decoder.Decode(&root); err != nil {
-		return nil, errors.Wrap(err, "解析运行态配置快照失败")
+		return nil, errors.Tag(err)
 	}
 
 	items := make([]types.ConfigItem, 0, 128)
 	snapshot := appendConfigItems(&items, "", root, false)
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].Path < items[j].Path
+	// 按路径固定顺序，避免 map 遍历顺序改变分页内容。
+	slices.SortFunc(items, func(left, right types.ConfigItem) int {
+		return strings.Compare(left.Path, right.Path)
 	})
-	snapshotYAML, err := marshalConfigSnapshotYAML(snapshot, true)
+	snapshotYAML, err := marshalConfigSnapshotYAML(snapshot)
 	if err != nil {
 		return nil, errors.Tag(err)
 	}
@@ -136,6 +136,7 @@ func buildMaskedConfigView(cfg appconfig.Config) (*maskedConfigView, error) {
 
 // buildMaskedRuntimeYAML 按 API 支持外置的运行期配置段展示已并入运行态的配置。
 func buildMaskedRuntimeYAML(cfg appconfig.Config) (string, error) {
+	// 未配置的整段不展示；已展示段内的 0 和 false 保留，不能误读为缺省启用。
 	view := make(map[string]any, 5)
 	if !reflect.DeepEqual(cfg.Auth, appconfig.AuthConfig{}) {
 		view["auth"] = cfg.Auth
@@ -152,18 +153,18 @@ func buildMaskedRuntimeYAML(cfg appconfig.Config) (string, error) {
 	if !reflect.DeepEqual(cfg.Ops, appconfig.OpsConfig{}) {
 		view["ops"] = cfg.Ops
 	}
-	return buildMaskedConfigYAML(view, true)
+	return buildMaskedConfigYAML(view)
 }
 
 // buildMaskedConfigYAML 将指定配置块转换为脱敏后的 YAML 文本。
-func buildMaskedConfigYAML(value any, omitZeroNumbers bool) (string, error) {
+func buildMaskedConfigYAML(value any) (string, error) {
 	root, err := decodeConfigJSONValue(value)
 	if err != nil {
 		return "", errors.Tag(err)
 	}
 	items := make([]types.ConfigItem, 0, 32)
 	snapshot := appendConfigItems(&items, "", root, false)
-	return marshalConfigSnapshotYAML(snapshot, omitZeroNumbers)
+	return marshalConfigSnapshotYAML(snapshot)
 }
 
 // decodeConfigJSONValue 通过 JSON 中间形态统一结构体 tag 和数字类型。
@@ -173,6 +174,7 @@ func decodeConfigJSONValue(value any) (any, error) {
 		return nil, errors.Wrap(err, "序列化配置块失败")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
+	// 保留 JSON 数字文本，避免大整数经 float64 中转后丢失精度。
 	decoder.UseNumber()
 
 	var root any
@@ -182,7 +184,7 @@ func decodeConfigJSONValue(value any) (any, error) {
 	return root, nil
 }
 
-// appendConfigItems 深度展开配置树；配置 key 原样保留，只有 value 按敏感规则脱敏。
+// appendConfigItems 展开配置树并传播父级敏感标记；地址映射的动态 key 也需脱敏。
 func appendConfigItems(items *[]types.ConfigItem, path string, value any, inheritedSensitive bool) any {
 	currentSensitive := inheritedSensitive || isSensitiveConfigPath(path) || isAddressConfigPath(path)
 	switch typed := value.(type) {
@@ -191,14 +193,16 @@ func appendConfigItems(items *[]types.ConfigItem, path string, value any, inheri
 			appendConfigLeaf(items, path, configItemValueObject, "{}", currentSensitive)
 			return map[string]any{}
 		}
-		keys := make([]string, 0, len(typed))
-		for key := range typed {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
+		// 原始键排序后再分配脱敏序号，同一地址在重复查询中保持同一展示路径。
+		keys := slices.Sorted(maps.Keys(typed))
 		maskedMap := make(map[string]any, len(typed))
-		for _, key := range keys {
-			maskedMap[key] = appendConfigItems(items, joinConfigPath(path, key), typed[key], currentSensitive)
+		for index, key := range keys {
+			displayKey := key
+			// addr_map 等动态映射把地址放在 YAML key 中；序号同时避免不同地址脱敏后覆盖同一个展示键。
+			if isAddressConfigPath(path) && isConfigAddressLike(key) {
+				displayKey = fmt.Sprintf("%s#%d", maskConfigString(key), index+1)
+			}
+			maskedMap[displayKey] = appendConfigItems(items, joinConfigPath(path, displayKey), typed[key], currentSensitive)
 		}
 		return maskedMap
 	case []any:
@@ -281,23 +285,21 @@ func paginateConfigItems(items []types.ConfigItem, page int, pageSize int) []typ
 		pageSize = len(items)
 	}
 	pageOffset := page - 1
-	if pageOffset > len(items)/pageSize {
+	// 空结果的缺省页大小仍为零；先判空，再用除法阻止页码乘法溢出。
+	if len(items) == 0 || pageOffset > len(items)/pageSize {
 		return []types.ConfigItem{}
 	}
 	start := pageOffset * pageSize
 	if start >= len(items) {
 		return []types.ConfigItem{}
 	}
-	end := start + pageSize
-	if end > len(items) {
-		end = len(items)
-	}
+	end := start + min(pageSize, len(items)-start)
 	return items[start:end]
 }
 
-// marshalConfigSnapshotYAML 输出紧凑 YAML，避免默认零值把页面撑得不可读。
-func marshalConfigSnapshotYAML(snapshot any, omitZeroNumbers bool) (string, error) {
-	compactSnapshot, ok := compactConfigYAMLValue(snapshot, omitZeroNumbers)
+// marshalConfigSnapshotYAML 压缩空容器和空文本，保留数字零值与关闭状态。
+func marshalConfigSnapshotYAML(snapshot any) (string, error) {
+	compactSnapshot, ok := compactConfigYAMLValue(snapshot)
 	if !ok {
 		return "", nil
 	}
@@ -312,27 +314,24 @@ func marshalConfigSnapshotYAML(snapshot any, omitZeroNumbers bool) (string, erro
 	return text + "\n", nil
 }
 
-// compactConfigYAMLValue 递归移除空值；运行态快照可按需隐藏数字零值。
-func compactConfigYAMLValue(value any, omitZeroNumbers bool) (any, bool) {
+// compactConfigYAMLValue 递归移除空容器和空文本，不改变叶子值的类型或零值。
+func compactConfigYAMLValue(value any) (any, bool) {
 	switch typed := value.(type) {
 	case map[string]any:
+		// 空子树不进入展示 YAML；此视图仅供查看，不能直接作为启动配置回写。
 		result := make(map[string]any, len(typed))
-		keys := make([]string, 0, len(typed))
-		for key := range typed {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			child, ok := compactConfigYAMLValue(typed[key], omitZeroNumbers)
+		for _, key := range slices.Sorted(maps.Keys(typed)) {
+			child, ok := compactConfigYAMLValue(typed[key])
 			if ok {
 				result[key] = child
 			}
 		}
 		return result, len(result) > 0
 	case []any:
+		// 列表只移除空元素，保留剩余元素的原始相对顺序。
 		result := make([]any, 0, len(typed))
 		for _, item := range typed {
-			child, ok := compactConfigYAMLValue(item, omitZeroNumbers)
+			child, ok := compactConfigYAMLValue(item)
 			if ok {
 				result = append(result, child)
 			}
@@ -340,11 +339,6 @@ func compactConfigYAMLValue(value any, omitZeroNumbers bool) (any, bool) {
 		return result, len(result) > 0
 	case string:
 		return typed, strings.TrimSpace(typed) != ""
-	case json.Number:
-		if omitZeroNumbers && typed.String() == "0" {
-			return nil, false
-		}
-		return configNumberYAMLValue(typed), true
 	case nil:
 		return nil, false
 	default:
@@ -371,8 +365,9 @@ func buildConfigSectionStats(items []types.ConfigItem) []types.ConfigSectionStat
 	for _, stat := range statsByName {
 		sections = append(sections, *stat)
 	}
-	sort.Slice(sections, func(i, j int) bool {
-		return sections[i].Name < sections[j].Name
+	// 聚合映射无序，输出前固定分组顺序，避免运维页面每次查询跳动。
+	slices.SortFunc(sections, func(left, right types.ConfigSectionStat) int {
+		return strings.Compare(left.Name, right.Name)
 	})
 	return sections
 }
@@ -439,7 +434,7 @@ func isSensitiveConfigPath(path string) bool {
 		return false
 	}
 	switch leaf {
-	case "access_key", "aes_iv", "aes_iv_ref", "aes_key", "aes_key_ref", "app_key",
+	case "access_key", "aes_key", "aes_key_ref", "app_key",
 		"jwt_secret", "password", "passwd", "private_key", "public_key", "pwd",
 		"secret", "secret_key", "secret_ref", "token", "webhook_url", "webhook_url_ref":
 		return true
@@ -462,9 +457,9 @@ func isAddressConfigPath(path string) bool {
 	}
 	switch leaf {
 	case "addr", "addr_map", "addrs", "address", "addresses", "broker", "brokers",
-		"data_source", "datasource", "domain", "dsn", "endpoint", "endpoints",
+		"config_reload_allowed_ips", "data_source", "datasource", "domain", "dsn", "endpoint", "endpoints",
 		"host", "hosts", "read_data_sources", "uri", "url", "webhook_url",
-		"write_data_source":
+		"trusted_proxies", "write_data_source":
 		return true
 	}
 	for _, token := range []string{"_addr", "_address", "_broker", "_data_source", "_datasource", "_domain", "_dsn", "_endpoint", "_host", "_uri", "_url"} {
@@ -479,6 +474,7 @@ func isAddressConfigPath(path string) bool {
 func configPathLeaf(path string) string {
 	leaf := strings.TrimSpace(path)
 	for strings.HasSuffix(leaf, "]") {
+		// 数组下标不属于字段名，brokers[0] 仍沿用 brokers 的地址脱敏规则。
 		index := strings.LastIndex(leaf, "[")
 		if index < 0 {
 			break
@@ -507,6 +503,13 @@ func isConfigAddressLike(value string) bool {
 		return true
 	}
 	if host, _, err := net.SplitHostPort(text); err == nil && strings.TrimSpace(host) != "" {
+		return true
+	}
+	// ParseIP/ParseCIDR 补齐正则无法可靠识别的纯 IPv6 与 IPv6 网段，避免内网拓扑进入公开配置快照。
+	if net.ParseIP(strings.Trim(text, "[]")) != nil {
+		return true
+	}
+	if _, _, err := net.ParseCIDR(text); err == nil {
 		return true
 	}
 	return configItemIPv4Pattern.MatchString(text) ||

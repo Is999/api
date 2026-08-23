@@ -1,4 +1,4 @@
 interface:
   display_name: "Go 配置运行时护栏"
   short_description: "核对配置来源、默认值、YAML 行级注释、热加载应用器与必须重启边界。"
-  default_prompt: "使用 $go-config-runtime-guard 逐字段复核这个配置改动的源码依据、YAML 注释、默认值、热加载和重启边界。"
+  default_prompt: "使用 $go-config-runtime-guard 按源码核对配置行为，在每个固定 YAML 字段正上方以同缩进的简洁中文说明消费组件、用途、真实取值和生效边界，不能用父节点概述代替。"

@@ -46,6 +46,7 @@ func (m *TraceMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 		requestctx.SetLocale(ctx, i18n.NormalizeLocale(r.Header.Get("Accept-Language")))
 		requestctx.SetNode(ctx, m.node)
 		requestctx.SetMode(ctx, "api")
+		// 标准 traceparent 优先，只有缺失时才尝试继承前端自定义 trace ID。
 		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(r.Header))
 		ctx = inheritTraceIDFromHeader(ctx, r)
 
@@ -60,6 +61,7 @@ func (m *TraceMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set(requestctx.HeaderTraceID, sc.TraceID().String())
 		w.Header().Set(requestctx.HeaderSpanID, sc.SpanID().String())
 		next(w, r.WithContext(ctx))
+		// 路由别名和业务状态由下游补齐，必须在 span 结束前同步。
 		syncSpanWithMeta(span, requestctx.FromContext(ctx))
 	}
 }
@@ -93,25 +95,24 @@ func inheritTraceIDFromHeader(ctx context.Context, r *http.Request) context.Cont
 
 // parseHeaderTraceID 校验并解析 32 位 trace id。
 func parseHeaderTraceID(raw string) (trace.TraceID, bool) {
-	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(raw), "-", ""))
-	if len(normalized) != 32 {
+	if len(raw) != 32 || raw != strings.TrimSpace(raw) || raw != strings.ToLower(raw) {
 		return trace.TraceID{}, false
 	}
-	if _, err := hex.DecodeString(normalized); err != nil {
+	if _, err := hex.DecodeString(raw); err != nil {
 		return trace.TraceID{}, false
 	}
-	traceID, err := trace.TraceIDFromHex(normalized)
+	traceID, err := trace.TraceIDFromHex(raw)
 	if err != nil || !traceID.IsValid() {
 		return trace.TraceID{}, false
 	}
 	return traceID, true
 }
 
-// newParentSpanID 为外部 trace id 创建临时父 span id。
+// newParentSpanID 为外部 trace id 创建临时父 span id；随机源失败时返回无效值并拒绝继承外部上下文。
 func newParentSpanID() trace.SpanID {
 	var spanID trace.SpanID
 	if _, err := rand.Read(spanID[:]); err != nil || !spanID.IsValid() {
-		return trace.SpanID{1}
+		return trace.SpanID{}
 	}
 	return spanID
 }
@@ -133,7 +134,7 @@ func syncSpanWithMeta(span trace.Span, meta *requestctx.Meta) {
 
 // resolveNodeName 优先使用实例配置，未配置时读取主机名。
 func resolveNodeName(instanceID string) string {
-	if instanceID = strings.TrimSpace(instanceID); instanceID != "" {
+	if instanceID != "" {
 		return instanceID
 	}
 	if name, err := os.Hostname(); err == nil && strings.TrimSpace(name) != "" {

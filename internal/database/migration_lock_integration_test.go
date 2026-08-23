@@ -21,6 +21,7 @@ func TestMigrationLockSerializesWithMySQL(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	firstDone := make(chan error, 1)
+	// 同一 MySQL 连接池提供两条会话，用命名锁验证跨连接互斥。
 	go func() {
 		firstDone <- WithMigrationLock(context.Background(), sqlDB, "api:test-schema-migration", time.Second, func() error {
 			close(entered)

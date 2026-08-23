@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"api/internal/handler/shared"
-	"api/internal/svc"
 )
 
 // RouteSpecs 返回前台认证路由规格。
@@ -16,9 +15,7 @@ func RouteSpecs() []shared.RouteSpec {
 			Meta:         shared.AuthRegister,
 			DocumentPath: shared.RouteDocAuth,
 			Chain:        shared.RouteSecurityPublic,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return RegisterHandler(svcCtx)
-			},
+			Handler:      RegisterHandler,
 		},
 		{
 			Method:       http.MethodPost,
@@ -26,9 +23,7 @@ func RouteSpecs() []shared.RouteSpec {
 			Meta:         shared.AuthLogin,
 			DocumentPath: shared.RouteDocAuth,
 			Chain:        shared.RouteSecurityPublic,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return LoginHandler(svcCtx)
-			},
+			Handler:      LoginHandler,
 		},
 		{
 			Method:       http.MethodPost,
@@ -36,9 +31,7 @@ func RouteSpecs() []shared.RouteSpec {
 			Meta:         shared.AuthRefresh,
 			DocumentPath: shared.RouteDocAuth,
 			Chain:        shared.RouteSecurityAuth,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return RefreshHandler(svcCtx)
-			},
+			Handler:      RefreshHandler,
 		},
 		{
 			Method:       http.MethodPost,
@@ -46,9 +39,7 @@ func RouteSpecs() []shared.RouteSpec {
 			Meta:         shared.AuthLogout,
 			DocumentPath: shared.RouteDocAuth,
 			Chain:        shared.RouteSecurityAuth,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return LogoutHandler(svcCtx)
-			},
+			Handler:      LogoutHandler,
 		},
 	}
 }

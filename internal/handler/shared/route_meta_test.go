@@ -67,7 +67,7 @@ func TestRouteSecurityPoliciesUseKnownAliases(t *testing.T) {
 	}
 }
 
-// validRouteAccess 返回测试使用的有效配置。
+// validRouteAccess 校验访问类型只能是公开、登录态或内网入口，空值不能隐式放行。
 func validRouteAccess(access RouteAccess) bool {
 	switch access {
 	case RouteAccessPublic, RouteAccessAuth, RouteAccessInternal:
@@ -77,7 +77,7 @@ func validRouteAccess(access RouteAccess) bool {
 	}
 }
 
-// routeMetaAccessByAlias 返回路由测试辅助数据。
+// routeMetaAccessByAlias 按别名索引内置访问策略，供路由表与安全策略交叉核对。
 func routeMetaAccessByAlias() map[string]RouteAccess {
 	result := make(map[string]RouteAccess, len(DefaultRouteMetas()))
 	for _, meta := range DefaultRouteMetas() {

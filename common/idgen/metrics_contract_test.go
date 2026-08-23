@@ -11,7 +11,9 @@ import (
 func TestObservabilityDocumentsOnlyUseImplementedMetrics(t *testing.T) {
 	t.Parallel()
 
+	// 白名单只登记当前进程真实导出的业务指标。
 	implemented := map[string]struct{}{
+		"api_auth_rate_limit_cleanup_failures_total":           {},
 		"api_collector_kafka_publish_events_total":             {},
 		"api_idgen_generate_duration_seconds_bucket":           {},
 		"api_idgen_generated_total":                            {},
@@ -26,6 +28,7 @@ func TestObservabilityDocumentsOnlyUseImplementedMetrics(t *testing.T) {
 		"../../docs/prometheus/api-alerts.yml",
 	}
 
+	// 监控资产中的 api_ 指标必须全部能映射到实现白名单。
 	for _, file := range files {
 		content, err := os.ReadFile(file)
 		if err != nil {

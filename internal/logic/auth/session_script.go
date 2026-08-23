@@ -11,6 +11,8 @@ import (
 var (
 	// userSessionCreateScript 原子创建会话、推进认证版本并执行每用户会话上限。
 	userSessionCreateScript = redis.NewScript(embedasset.StripLeadingLineComments(userSessionCreateScriptText, "--"))
+	// userSessionRollbackScript 在数据库提交失败时按认证版本栅栏回滚新会话并恢复本次淘汰项。
+	userSessionRollbackScript = redis.NewScript(embedasset.StripLeadingLineComments(userSessionRollbackScriptText, "--"))
 	// userSessionRotateScript 在稳定 sid 下原子 CAS 完整旧 token。
 	userSessionRotateScript = redis.NewScript(embedasset.StripLeadingLineComments(userSessionRotateScriptText, "--"))
 	// userSessionInvalidateScript 按已提交的数据库认证版本原子失效全部会话。
@@ -23,6 +25,11 @@ var (
 //
 //go:embed assets/user_session_create.lua
 var userSessionCreateScriptText string
+
+// userSessionRollbackScriptText 保存会话创建失败补偿 Lua 资产。
+//
+//go:embed assets/user_session_rollback.lua
+var userSessionRollbackScriptText string
 
 // userSessionRotateScriptText 保存会话轮换 Lua 资产。
 //

@@ -30,12 +30,12 @@ func TestDefaultMigrationsContainCoreTables(t *testing.T) {
 		name    string // name 表示期望迁移名称。
 		asset   string // asset 表示期望 SQL 资产。
 	}{
-		{version: "202606220001", name: "create_user", asset: userSchemaAsset},
-		{version: "202606220002", name: "create_sys_config", asset: sysConfigSchemaAsset},
-		{version: "202606220003", name: "create_user_identity_username", asset: userIdentityUsernameSchemaAsset},
-		{version: "202606220004", name: "create_user_identity_email", asset: userIdentityEmailSchemaAsset},
-		{version: "202606220005", name: "create_user_identity_phone", asset: userIdentityPhoneSchemaAsset},
-		{version: "202606220006", name: "create_user_identity_oauth", asset: userIdentityOAuthSchemaAsset},
+		{version: "202606220001", name: "bootstrap_user", asset: userSchemaAsset},
+		{version: "202606220002", name: "bootstrap_sys_config", asset: sysConfigSchemaAsset},
+		{version: "202606220003", name: "bootstrap_user_identity_username", asset: userIdentityUsernameSchemaAsset},
+		{version: "202606220004", name: "bootstrap_user_identity_email", asset: userIdentityEmailSchemaAsset},
+		{version: "202606220005", name: "bootstrap_user_identity_phone", asset: userIdentityPhoneSchemaAsset},
+		{version: "202606220006", name: "bootstrap_user_identity_oauth", asset: userIdentityOAuthSchemaAsset},
 	}
 	if len(migrations) != len(expected) {
 		t.Fatalf("DefaultMigrations() len = %d, want %d: %+v", len(migrations), len(expected), migrations)
@@ -44,6 +44,9 @@ func TestDefaultMigrationsContainCoreTables(t *testing.T) {
 		got := migrations[index]
 		if got.Version != want.version || got.Name != want.name || got.Asset != want.asset {
 			t.Fatalf("DefaultMigrations()[%d] = %+v, want version=%s name=%s asset=%s", index, got, want.version, want.name, want.asset)
+		}
+		if !got.BootstrapOnly || got.Destructive {
+			t.Fatalf("DefaultMigrations()[%d] 必须是非破坏性空库基线: %+v", index, got)
 		}
 	}
 }

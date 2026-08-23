@@ -96,6 +96,21 @@ func TestTryLockRejectsNilRedisClient(t *testing.T) {
 	if !strings.Contains(err.Error(), "Redis 锁未初始化") {
 		t.Fatalf("unexpected lock error: %v", err)
 	}
+	if !errors.Is(err, ErrLockUnavailable) {
+		t.Fatalf("nil redis client error = %v, want ErrLockUnavailable", err)
+	}
+}
+
+// TestTryLockRejectsNonCanonicalKey 确保分布式锁不会把带空白 key 改写到另一命名空间。
+func TestTryLockRejectsNonCanonicalKey(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	defer client.Close()
+
+	err := NewLock(client, " lock:user:1 ").TryLock(context.Background(), time.Second)
+	if err == nil || !strings.Contains(err.Error(), "首尾空白") {
+		t.Fatalf("非规范锁 key 错误=%v，期望明确拒绝", err)
+	}
 }
 
 // TestIsLockTakenDetectsContention 校验锁竞争错误能被识别为可跳过的互斥冲突。
@@ -120,6 +135,9 @@ func TestIsLockTakenDetectsContention(t *testing.T) {
 	}
 	if !IsLockTaken(err) {
 		t.Fatalf("expected lock taken error, got %v", err)
+	}
+	if errors.Is(err, ErrLockUnavailable) {
+		t.Fatalf("lock contention must not be classified as unavailable: %v", err)
 	}
 }
 
@@ -175,6 +193,31 @@ func TestWithLockReturnsUnlockError(t *testing.T) {
 	if !strings.Contains(err.Error(), "释放 Redis 锁失败") {
 		t.Fatalf("expected release failure, got %v", err)
 	}
+	if !errors.Is(err, ErrLockUnavailable) {
+		t.Fatalf("unlock redis failure = %v, want ErrLockUnavailable", err)
+	}
+}
+
+// TestUnlockClassifiesMissingOwnerAsLockLost 验证 owner key 已消失时返回丢锁语义，而不是误报 Redis 基础设施不可用。
+func TestUnlockClassifiesMissingOwnerAsLockLost(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	defer client.Close()
+
+	lock := NewLock(client, "lock:owner-lost")
+	if err := lock.TryLock(context.Background(), time.Second); err != nil {
+		t.Fatalf("获取测试锁失败: %v", err)
+	}
+	if err := client.Del(context.Background(), "lock:owner-lost").Err(); err != nil {
+		t.Fatalf("删除测试 owner key 失败: %v", err)
+	}
+	err := lock.Unlock()
+	if !errors.Is(err, ErrLockLost) {
+		t.Fatalf("owner 消失时错误=%v，期望 ErrLockLost", err)
+	}
+	if errors.Is(err, ErrLockUnavailable) {
+		t.Fatalf("owner 消失不应误报 Redis 不可用: %v", err)
+	}
 }
 
 // TestWithLockConvertsPanicToError 校验业务回调异常会转换成错误，并且仍会释放 owner 锁。
@@ -219,6 +262,9 @@ func TestWithLockPreservesAcquireContextError(t *testing.T) {
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected acquisition deadline error, got %v", err)
+	}
+	if errors.Is(err, ErrLockUnavailable) {
+		t.Fatalf("parent deadline must not be classified as redis unavailable: %v", err)
 	}
 }
 

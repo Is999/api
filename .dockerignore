@@ -1,0 +1,21 @@
+# 构建只接收源码和公开资产；Git 忽略规则不会自动约束 Docker 上下文。
+.git
+.agents
+.idea
+.DS_Store
+bin
+data
+dist
+logs
+tmp
+.env
+.env.*
+*.log
+*.pem
+*.key
+etc/config.yaml
+etc/config.*.local.yaml
+etc/config.*.runtime.yaml
+etc/config.d/runtime.yaml
+etc/keys
+etc/values.*.local.yaml

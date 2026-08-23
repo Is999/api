@@ -9,6 +9,7 @@ import (
 
 	"api/internal/config"
 	"api/internal/handler/shared"
+	"api/internal/routealias"
 	"api/internal/security"
 	"api/internal/svc"
 
@@ -68,6 +69,7 @@ func TestDefaultRouteSpecsValid(t *testing.T) {
 
 // TestDefaultRouteContractsMatchRegisteredRoutes 确保契约表与真实注册路由一致。
 func TestDefaultRouteContractsMatchRegisteredRoutes(t *testing.T) {
+	// 公网和内网分别注册，避免只检查静态规格而遗漏真实装配。
 	publicServer := rest.MustNewServer(rest.RestConf{Host: "127.0.0.1", Port: 0})
 	defer publicServer.Stop()
 	internalServer := rest.MustNewServer(rest.RestConf{Host: "127.0.0.1", Port: 0})
@@ -81,6 +83,7 @@ func TestDefaultRouteContractsMatchRegisteredRoutes(t *testing.T) {
 		t.Fatalf("注册内网路由失败: %v", err)
 	}
 
+	// 先合并真实路由并确认两个监听器不存在交叉注册。
 	publicRoutes := routeSet(publicServer.Routes())
 	internalRoutes := routeSet(internalServer.Routes())
 	registered := make(map[string]struct{}, len(publicRoutes)+len(internalRoutes))
@@ -91,14 +94,12 @@ func TestDefaultRouteContractsMatchRegisteredRoutes(t *testing.T) {
 		}
 	}
 	for key := range internalRoutes {
-		if !strings.Contains(key, " /internal/") {
-			t.Fatalf("internal server registered public route: %s", key)
-		}
 		if _, exists := registered[key]; exists {
 			t.Fatalf("route registered on both servers: %s", key)
 		}
 		registered[key] = struct{}{}
 	}
+	// 每条契约必须在正确监听器中恰好出现一次。
 	contracts := DefaultRouteContracts()
 	if len(registered) != len(contracts) {
 		t.Fatalf("registered route count = %d, contract count = %d", len(registered), len(contracts))
@@ -108,19 +109,35 @@ func TestDefaultRouteContractsMatchRegisteredRoutes(t *testing.T) {
 		if _, ok := registered[key]; !ok {
 			t.Fatalf("contract route is not registered: %s", key)
 		}
+		_, onPublic := publicRoutes[key]
+		_, onInternal := internalRoutes[key]
+		wantInternal := contract.Meta.Access == shared.RouteAccessInternal || contract.InternalOnly
+		if onInternal != wantInternal || onPublic == wantInternal {
+			t.Fatalf("route listener mismatch: %s public=%t internal=%t want_internal=%t", key, onPublic, onInternal, wantInternal)
+		}
 	}
 }
 
 // TestRegisterHandlersAppendsRouteModules 确保外部路由模块可以通过统一入口追加注册。
 func TestRegisterHandlersAppendsRouteModules(t *testing.T) {
+	// 临时安全策略与自定义模块共同模拟外部扩展入口。
 	server := rest.MustNewServer(rest.RestConf{Host: "127.0.0.1", Port: 0})
 	defer server.Stop()
 
+	customAlias := routealias.Alias("custom.read")
+	security.RouteSecurityPolicies[customAlias] = security.RouteSecurityPolicy{RequestSign: []string{}}
+	defer delete(security.RouteSecurityPolicies, customAlias)
 	module := NewRouteModuleFunc("custom", func() []shared.RouteSpec {
 		return []shared.RouteSpec{{
-			Method: http.MethodGet,
-			Path:   "/api/custom",
-			Chain:  shared.RouteSecurityNone,
+			Method:       http.MethodGet,
+			Path:         "/api/custom",
+			DocumentPath: shared.RouteDocSystem,
+			Meta: shared.RouteMeta{
+				Alias:    customAlias,
+				Access:   shared.RouteAccessPublic,
+				Describe: "扩展路由测试",
+			},
+			Chain: shared.RouteSecurityPublic,
 			Handler: func(*svc.ServiceContext) http.HandlerFunc {
 				return func(w http.ResponseWriter, _ *http.Request) {
 					w.WriteHeader(http.StatusNoContent)
@@ -128,6 +145,7 @@ func TestRegisterHandlersAppendsRouteModules(t *testing.T) {
 			},
 		}}
 	})
+	// 通过公开注册入口追加后，从 go-zero 真实路由表验证结果。
 	if err := RegisterPublicHandlers(server, svc.NewServiceContext(config.Config{}, "test-version", svc.Dependencies{}), module); err != nil {
 		t.Fatalf("注册扩展路由失败: %v", err)
 	}
@@ -141,6 +159,53 @@ func TestRegisterHandlersAppendsRouteModules(t *testing.T) {
 	}
 }
 
+// TestRegisterHandlersRejectsInvalidModules 确保扩展模块配置错误会拒绝启动而不是静默跳过。
+func TestRegisterHandlersRejectsInvalidModules(t *testing.T) {
+	tests := []struct {
+		name    string        // name 表示错误注册场景。
+		modules []RouteModule // modules 表示待注册模块。
+	}{
+		{name: "nil", modules: []RouteModule{nil}},
+		{name: "non-canonical name", modules: []RouteModule{NewRouteModuleFunc(" custom ", func() []shared.RouteSpec { return []shared.RouteSpec{{}} })}},
+		{name: "empty routes", modules: []RouteModule{NewRouteModuleFunc("custom", func() []shared.RouteSpec { return nil })}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := rest.MustNewServer(rest.RestConf{Host: "127.0.0.1", Port: 0})
+			defer server.Stop()
+			svcCtx := svc.NewServiceContext(config.Config{}, "test-version", svc.Dependencies{})
+			if err := RegisterPublicHandlersWithModules(server, svcCtx, tt.modules...); err == nil {
+				t.Fatal("expected invalid route module error")
+			}
+		})
+	}
+}
+
+// TestRegisterHandlersRejectsDuplicateRoutesBeforeServerStart 确保扩展模块不能把重复路由留到监听阶段触发 panic。
+func TestRegisterHandlersRejectsDuplicateRoutesBeforeServerStart(t *testing.T) {
+	server := rest.MustNewServer(rest.RestConf{Host: "127.0.0.1", Port: 0})
+	defer server.Stop()
+	duplicate := func(name string) RouteModule {
+		return NewRouteModuleFunc(name, func() []shared.RouteSpec {
+			return []shared.RouteSpec{{
+				Method:       http.MethodGet,
+				Path:         "/api/live",
+				Meta:         shared.HealthLive,
+				DocumentPath: shared.RouteDocHealth,
+				Chain:        shared.RouteSecurityNone,
+				Handler:      func(*svc.ServiceContext) http.HandlerFunc { return func(http.ResponseWriter, *http.Request) {} },
+			}}
+		})
+	}
+	err := RegisterPublicHandlersWithModules(server, svc.NewServiceContext(config.Config{}, "test-version", svc.Dependencies{}), duplicate("first"), duplicate("second"))
+	if err == nil || !strings.Contains(err.Error(), "路由重复") {
+		t.Fatalf("期望重复路由在启动前返回错误，实际 err=%v", err)
+	}
+	if len(server.Routes()) != 0 {
+		t.Fatalf("校验失败前不应写入任何路由，实际=%+v", server.Routes())
+	}
+}
+
 // TestCustomRouteModuleIsPartitionedBySecurityChain 确保扩展模块也不能把内网路由注册到公网监听器。
 func TestCustomRouteModuleIsPartitionedBySecurityChain(t *testing.T) {
 	publicServer := rest.MustNewServer(rest.RestConf{Host: "127.0.0.1", Port: 0})
@@ -149,8 +214,14 @@ func TestCustomRouteModuleIsPartitionedBySecurityChain(t *testing.T) {
 	defer internalServer.Stop()
 	module := NewRouteModuleFunc("custom-internal", func() []shared.RouteSpec {
 		return []shared.RouteSpec{{
-			Method:  http.MethodPost,
-			Path:    "/internal/custom",
+			Method:       http.MethodPost,
+			Path:         "/internal/custom",
+			DocumentPath: shared.RouteDocSystem,
+			Meta: shared.RouteMeta{
+				Alias:    routealias.Alias("custom.internal"),
+				Access:   shared.RouteAccessInternal,
+				Describe: "扩展内网路由测试",
+			},
 			Chain:   shared.RouteSecurityInternal,
 			Handler: func(*svc.ServiceContext) http.HandlerFunc { return func(http.ResponseWriter, *http.Request) {} },
 		}}
@@ -197,7 +268,25 @@ func TestDefaultRouteContractsValid(t *testing.T) {
 		if contract.Meta.Access != shared.RouteAccessInternal && strings.HasPrefix(contract.Path, "/internal/") {
 			t.Fatalf("non-internal route must not use /internal/ prefix: %+v", contract)
 		}
+		if contract.InternalOnly && contract.Meta.Alias != shared.HealthMetrics.Alias {
+			t.Fatalf("非指标路由不得绕过访问级别声明为仅内网: %+v", contract)
+		}
 	}
+}
+
+// TestMetricsRouteIsInternalListenerOnly 验证指标无需应用层凭证，但不会暴露在公网监听器。
+func TestMetricsRouteIsInternalListenerOnly(t *testing.T) {
+	key := routeKey(http.MethodGet, "/api/metrics")
+	for _, spec := range DefaultRouteSpecs() {
+		if routeKey(spec.Method, spec.Path) != key {
+			continue
+		}
+		if !spec.InternalOnly || spec.Chain != shared.RouteSecurityNone {
+			t.Fatalf("metrics 路由边界错误: %+v", spec)
+		}
+		return
+	}
+	t.Fatal("缺少 metrics 路由")
 }
 
 // TestDefaultRouteContractsSkipAccessLog 确保只有健康探针路由会跳过普通访问日志。
@@ -249,7 +338,8 @@ func TestRouteSecurityPoliciesMatchDocuments(t *testing.T) {
 		if !ok {
 			t.Fatalf("document %s missing route section %s", contract.DocumentPath, routeKey(contract.Method, contract.Path))
 		}
-		rows := routeSecurityDocumentRows(security.PolicyByRoute(string(contract.Meta.Alias)))
+		policy, _ := security.LookupRoutePolicy(string(contract.Meta.Alias))
+		rows := routeSecurityDocumentRows(policy)
 		for label, value := range rows {
 			row := "| " + label + " | " + value + " |"
 			if !strings.Contains(section, row) {
@@ -272,7 +362,7 @@ func TestRouteSecurityPoliciesUseContractAliases(t *testing.T) {
 	}
 }
 
-// routeSet 返回路由测试辅助数据。
+// routeSet 返回按 HTTP 方法和路径去重后的注册路由集合。
 func routeSet(routes []rest.Route) map[string]struct{} {
 	result := make(map[string]struct{}, len(routes))
 	for _, route := range routes {
@@ -285,7 +375,7 @@ func routeSet(routes []rest.Route) map[string]struct{} {
 	return result
 }
 
-// routeDocumentSection 返回路由测试辅助数据。
+// routeDocumentSection 截取指定路由标识所在的二级文档章节。
 func routeDocumentSection(document string, key string) (string, bool) {
 	lines := strings.Split(document, "\n")
 	start := -1
@@ -310,7 +400,7 @@ func routeDocumentSection(document string, key string) (string, bool) {
 	return strings.Join(lines[start:end], "\n"), true
 }
 
-// routeSecurityDocumentRows 返回路由测试辅助数据。
+// routeSecurityDocumentRows 生成接口文档必须声明的四项安全字段。
 func routeSecurityDocumentRows(policy security.RouteSecurityPolicy) map[string]string {
 	return map[string]string{
 		"请求签名字段": signDocumentFieldValue(policy.RequestSign),
@@ -331,7 +421,7 @@ func signDocumentFieldValue(fields []string) string {
 	return strings.Join(fields, ", ")
 }
 
-// securityDocumentFieldValue 返回安全测试辅助数据。
+// securityDocumentFieldValue 将空字段列表映射为指定的关闭文案。
 func securityDocumentFieldValue(fields []string, empty string) string {
 	if len(fields) == 0 {
 		return empty
@@ -339,7 +429,7 @@ func securityDocumentFieldValue(fields []string, empty string) string {
 	return strings.Join(fields, ", ")
 }
 
-// routeKey 返回路由测试辅助数据。
+// routeKey 生成方法和路径经过规范化的路由标识。
 func routeKey(method, path string) string {
 	return strings.ToUpper(strings.TrimSpace(method)) + " " + strings.TrimSpace(path)
 }

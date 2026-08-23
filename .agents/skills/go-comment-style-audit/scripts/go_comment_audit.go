@@ -37,6 +37,7 @@ func main() {
 	}
 
 	var findings []finding
+	// 结构扫描只发现中文注释缺口，是否解释真实行为仍由审阅者判断。
 	fset := token.NewFileSet()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -95,6 +96,7 @@ func isGenerated(path string) bool {
 		return false
 	}
 	if len(data) > 4096 {
+		// 只接受文件头的生成标记，避免正文字符串意外豁免整个文件。
 		data = data[:4096]
 	}
 	for _, line := range strings.Split(string(data), "\n") {
@@ -121,6 +123,7 @@ func auditFile(fset *token.FileSet, path string, file *ast.File) []finding {
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
+			// 入口函数固定豁免声明注释，但其内部行为仍需人工阅读。
 			if d.Name.Name == "init" || d.Name.Name == "main" {
 				continue
 			}
@@ -132,6 +135,7 @@ func auditFile(fset *token.FileSet, path string, file *ast.File) []finding {
 		}
 	}
 
+	// 递归补查嵌套结构体字段，不检查普通局部变量或方法内的行为说明。
 	ast.Inspect(file, func(n ast.Node) bool {
 		st, ok := n.(*ast.StructType)
 		if !ok || namedStructs[st.Pos()] {
@@ -144,7 +148,7 @@ func auditFile(fset *token.FileSet, path string, file *ast.File) []finding {
 	return findings
 }
 
-// auditGenDecl 检查 type、const、var 声明及命名结构体字段。
+// auditGenDecl 检查顶层 type、const、var 声明及命名结构体字段。
 func auditGenDecl(fset *token.FileSet, path string, d *ast.GenDecl, namedStructs map[token.Pos]bool) []finding {
 	var findings []finding
 	multi := len(d.Specs) > 1
@@ -171,7 +175,7 @@ func auditGenDecl(fset *token.FileSet, path string, d *ast.GenDecl, namedStructs
 	return findings
 }
 
-// auditStructFields 检查结构体字段是否具备可维护说明。
+// auditStructFields 检查结构体字段是否带中文注释，不评价说明的准确性。
 func auditStructFields(fset *token.FileSet, path string, st *ast.StructType, owner string) []finding {
 	var findings []finding
 	if st.Fields == nil {
@@ -190,7 +194,7 @@ func auditStructFields(fset *token.FileSet, path string, st *ast.StructType, own
 	return findings
 }
 
-// hasDoc 判断声明或行尾是否存在中文说明。
+// hasDoc 只识别中文字符，注释的信息量和业务含义由人工复核。
 func hasDoc(doc *ast.CommentGroup, line *ast.CommentGroup) bool {
 	if doc != nil && chineseTextPattern.MatchString(doc.Text()) {
 		return true

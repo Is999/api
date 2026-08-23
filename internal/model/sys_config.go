@@ -19,11 +19,11 @@ const (
 	SysConfigTypeInteger = 4
 	// SysConfigTypeFloat 表示 Float 配置值。
 	SysConfigTypeFloat = 5
-	// SysConfigTypeBoolean 表示 Boolean 配置值。
+	// SysConfigTypeBoolean 表示数据库中以 0/1 保存的 Boolean 配置值。
 	SysConfigTypeBoolean = 6
 )
 
-// SysConfig 表示运行期系统配置项。
+// SysConfig 映射后台维护的配置字典；Value 和 Example 是 JSON 文本，API 按 Type 解析，不能直接当字符串业务值。
 type SysConfig struct {
 	ID        int       `gorm:"column:id;type:int unsigned;primaryKey;autoIncrement:true;comment:主键" json:"id"`                                                                    // 主键
 	UUID      string    `gorm:"column:uuid;type:varchar(100);not null;uniqueIndex:uk_uuid,priority:1;comment:配置唯一标识,命名规则(驼峰)：项目名+key" json:"uuid"`                                 // 配置唯一标识

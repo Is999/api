@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -22,8 +23,11 @@ func TestSysConfigKeyRegistryLookupAndCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSysConfigKeyRegistry() error = %v", err)
 	}
-	if _, ok := registry.Lookup(" featureFlag "); !ok {
+	if _, ok := registry.Lookup("featureFlag"); !ok {
 		t.Fatal("Lookup(featureFlag) should find key")
+	}
+	if _, ok := registry.Lookup(" featureFlag "); ok {
+		t.Fatal("Lookup() must reject a non-canonical uuid")
 	}
 	items := registry.Items()
 	items[0].UUID = "changed"
@@ -43,8 +47,16 @@ func TestSysConfigKeyRegistryRejectsInvalidDefault(t *testing.T) {
 	}
 }
 
+// TestSysConfigKeyRegistryRejectsNonCanonicalUUID 确保声明端不会把空白变体注册成同一个缓存键。
+func TestSysConfigKeyRegistryRejectsNonCanonicalUUID(t *testing.T) {
+	if _, err := NewSysConfigKeyRegistry(RequiredSysConfigKey(" featureFlag ", model.SysConfigTypeBoolean, "功能开关")); err == nil {
+		t.Fatal("expected non-canonical sys_config uuid error")
+	}
+}
+
 // TestTypedSysConfigGettersReadRedis 确保类型化读取优先使用 Redis 缓存。
 func TestTypedSysConfigGettersReadRedis(t *testing.T) {
+	// 按缓存存储格式预置全部支持的标量和容器类型。
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	defer client.Close()
@@ -57,6 +69,7 @@ func TestTypedSysConfigGettersReadRedis(t *testing.T) {
 	seedTypedSysConfigCache(t, client, logicObj, "objectValue", model.SysConfigTypeObject, `{"a":1}`)
 	seedTypedSysConfigCache(t, client, logicObj, "arrayValue", model.SysConfigTypeArray, `[1,"b"]`)
 
+	// 类型化 Getter 必须逐项还原为稳定的 Go 类型和值。
 	flag, err := logicObj.GetBool(RequiredSysConfigKey("featureFlag", model.SysConfigTypeBoolean, "功能开关"))
 	if err != nil || !flag {
 		t.Fatalf("GetBool() = %v, %v; want true, nil", flag, err)
@@ -74,11 +87,11 @@ func TestTypedSysConfigGettersReadRedis(t *testing.T) {
 		t.Fatalf("GetFloat() = %v, %v; want 3.14, nil", ratio, err)
 	}
 	objectValue, err := logicObj.GetObject(RequiredSysConfigKey("objectValue", model.SysConfigTypeObject, "对象值"))
-	if err != nil || !reflect.DeepEqual(objectValue, map[string]any{"a": float64(1)}) {
+	if err != nil || !reflect.DeepEqual(objectValue, map[string]any{"a": json.Number("1")}) {
 		t.Fatalf("GetObject() = %#v, %v", objectValue, err)
 	}
 	arrayValue, err := logicObj.GetArray(RequiredSysConfigKey("arrayValue", model.SysConfigTypeArray, "数组值"))
-	if err != nil || !reflect.DeepEqual(arrayValue, []any{float64(1), "b"}) {
+	if err != nil || !reflect.DeepEqual(arrayValue, []any{json.Number("1"), "b"}) {
 		t.Fatalf("GetArray() = %#v, %v", arrayValue, err)
 	}
 }
@@ -92,7 +105,6 @@ func TestTypedSysConfigReturnsDefaultOnEmptyMarker(t *testing.T) {
 	logicObj := newSysConfigLogicForKeyTest(client)
 	cacheKey := logicObj.sysConfigCacheKey("featureFlag")
 	if err := client.HSet(context.Background(), cacheKey, map[string]any{
-		sysConfigCacheFieldUUID:  "featureFlag",
 		sysConfigCacheFieldValue: keys.EmptyValueMarker,
 	}).Err(); err != nil {
 		t.Fatalf("seed empty sys_config cache: %v", err)
@@ -128,17 +140,28 @@ func TestTypedSysConfigRejectsActualTypeMismatch(t *testing.T) {
 	}
 }
 
-// newSysConfigLogicForKeyTest 构造测试依赖。
+// TestDecodeSysConfigValueRejectsNonCanonicalFormats 确保共享缓存只读取 Admin 当前写入的规范 JSON 形态。
+func TestDecodeSysConfigValueRejectsNonCanonicalFormats(t *testing.T) {
+	for _, raw := range []string{"true", "TRUE", "false", "2", "invalid", " 1 "} {
+		if _, err := decodeSysConfigValue(model.SysConfigTypeBoolean, raw); err == nil {
+			t.Fatalf("decodeSysConfigValue(boolean, %q) expected error", raw)
+		}
+	}
+	if _, err := decodeSysConfigValue(model.SysConfigTypeString, "plain-text"); err == nil {
+		t.Fatal("decodeSysConfigValue(string) expected malformed JSON error")
+	}
+}
+
+// newSysConfigLogicForKeyTest 只注入 Redis，确保命中缓存的 Getter 不依赖数据库。
 func newSysConfigLogicForKeyTest(client redis.UniversalClient) *SysConfigLogic {
 	return NewSysConfigLogic(context.Background(), svc.NewServiceContext(appconfig.Config{AppID: "site-a"}, "v1", svc.Dependencies{Rds: client}))
 }
 
-// seedTypedSysConfigCache 写入测试数据。
+// seedTypedSysConfigCache 按 Admin 写入的 Hash 字段预置共享缓存，不模拟数据库回源。
 func seedTypedSysConfigCache(t *testing.T, client redis.UniversalClient, logicObj *SysConfigLogic, uuid string, typ int, value string) {
 	t.Helper()
 	cacheKey := logicObj.sysConfigCacheKey(uuid)
 	if err := client.HSet(context.Background(), cacheKey, map[string]any{
-		sysConfigCacheFieldUUID:  uuid,
 		sysConfigCacheFieldType:  typ,
 		sysConfigCacheFieldValue: value,
 	}).Err(); err != nil {

@@ -8,6 +8,7 @@ import (
 
 // TestRegisterReusesExistingCollector 校验同类型重复指标返回已有实例，不在运行期触发 panic。
 func TestRegisterReusesExistingCollector(t *testing.T) {
+	// 默认注册表是进程全局状态，此用例必须串行执行并在结束时恢复。
 	previousRegisterer := prometheus.DefaultRegisterer
 	previousGatherer := prometheus.DefaultGatherer
 	registry := prometheus.NewRegistry()

@@ -46,6 +46,7 @@ func NewPlan(firstTable string, count int) (Plan, error) {
 		return Plan{}, errors.Errorf("起始物理表名无有效前缀 table=%s", firstTable)
 	}
 	plan := Plan{firstTable: firstTable, prefix: prefix, count: count}
+	// 构造时即验证最长生成表名，不能到第一次访问末分片时才发现标识符超限。
 	if _, err := plan.TableAt(count - 1); err != nil {
 		return Plan{}, errors.Tag(err)
 	}
@@ -83,6 +84,7 @@ func (p Plan) TableAt(index int) (Table, error) {
 	start := index * width
 	name := p.firstTable
 	if start > 0 {
+		// 表名绑定固定桶起点，物理分片翻倍时保留已有表名。
 		name = fmt.Sprintf("%s_b%04d", p.prefix, start)
 	}
 	if err := validateTableName(name); err != nil {

@@ -1,6 +1,6 @@
 package logic
 
-// RuntimeRegistrySpec 描述业务子包暴露给默认清单的轻量运行时扩展入口。
+// RuntimeRegistrySpec 供启动清单展示扩展来源，不通过文件名或方法名动态调用注册逻辑。
 type RuntimeRegistrySpec struct {
 	Name        string // 注册名称，必须在运行时扩展清单中唯一
 	File        string // 注册实现所在文件

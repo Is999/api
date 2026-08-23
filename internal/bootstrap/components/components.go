@@ -2,12 +2,12 @@ package components
 
 import (
 	"context"
-	"database/sql"
 	"sort"
 
 	codes "api/common/codes"
 	"api/common/idgen"
 	"api/internal/bootstrap/register"
+	mysqlx "api/internal/infra/mysql"
 	"api/internal/svc"
 
 	"github.com/Is999/go-utils/errors"
@@ -61,7 +61,7 @@ func NewRegistry(svcCtx *svc.ServiceContext) (*svc.ComponentRegistry, error) {
 	return svc.NewComponentRegistry(items...)
 }
 
-// DefaultSpecs 返回默认组件生命周期来源，顺序即注册和关闭顺序。
+// DefaultSpecs 返回默认组件生命周期来源；正序注册，停机时逆序关闭。
 func DefaultSpecs() []Spec {
 	return []Spec{
 		{
@@ -180,7 +180,7 @@ func mysqlComponent(name string, db *gorm.DB, closeGuard *gormDBCloseGuard) svc.
 		Name:      name,
 		ErrorCode: codes.MySQLUnavailable,
 		Check: func(ctx context.Context) error {
-			return errors.Tag(checkGormDB(ctx, db))
+			return errors.Tag(mysqlx.Ping(ctx, db))
 		},
 		Close: func(context.Context) error {
 			return closeGuard.close(name, db)
@@ -217,6 +217,7 @@ func snowflakeComponent(lease svc.SnowflakeLease) svc.Component {
 			if lease != nil {
 				return errors.Tag(lease.Ready(ctx))
 			}
+			// 手工 worker_id 不持有租约，readiness 改查本地发号器是否已配置。
 			if _, ok := idgen.CurrentWorkerID(); !ok {
 				return errors.Errorf("雪花 worker_id 未初始化")
 			}
@@ -251,29 +252,6 @@ func collectorComponent(collector svc.Collector) svc.Component {
 	}
 }
 
-// checkGormDB 将 GORM 连接转换为底层连接池并执行 PING。
-func checkGormDB(ctx context.Context, db *gorm.DB) error {
-	if db == nil {
-		return errors.Errorf("数据库连接未初始化")
-	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		return errors.Wrap(err, "数据库连接池不可用")
-	}
-	return errors.Tag(checkSQLDB(ctx, sqlDB))
-}
-
-// checkSQLDB 探测 SQL 连接池。
-func checkSQLDB(ctx context.Context, db *sql.DB) error {
-	if db == nil {
-		return errors.Errorf("数据库连接池未初始化")
-	}
-	if err := db.PingContext(ctx); err != nil {
-		return errors.Wrap(err, "数据库PING失败")
-	}
-	return nil
-}
-
 // close 去重关闭 GORM 底层连接池。
 func (g *gormDBCloseGuard) close(name string, db *gorm.DB) error {
 	if g == nil || db == nil {
@@ -283,14 +261,7 @@ func (g *gormDBCloseGuard) close(name string, db *gorm.DB) error {
 		return nil
 	}
 	g.closed[db] = struct{}{}
-	sqlDB, err := db.DB()
-	if err != nil {
-		return errors.Wrapf(err, "获取 MySQL[%s]底层连接池失败", name)
-	}
-	if sqlDB == nil {
-		return nil
-	}
-	if err = sqlDB.Close(); err != nil {
+	if err := mysqlx.Close(db); err != nil {
 		return errors.Wrapf(err, "关闭 MySQL[%s]连接池失败", name)
 	}
 	return nil

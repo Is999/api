@@ -1,8 +1,6 @@
 package svc
 
 import (
-	"strings"
-
 	"gorm.io/gorm"
 	"gorm.io/plugin/dbresolver"
 )
@@ -10,7 +8,7 @@ import (
 // DBName 表示可路由的数据库名称。
 type DBName string
 
-// 数据库名称枚举，空值会归一化到主库。
+// 数据库名称枚举。
 const (
 	// DatabaseMain 表示默认主库。
 	DatabaseMain DBName = "main"
@@ -24,7 +22,7 @@ func (s *ServiceContext) DB(database DBName) *gorm.DB {
 	return s.SiteDBs.Lookup(database)
 }
 
-// ReadDB 根据数据库名称返回只读连接。
+// ReadDB 指定读库路由；未配置副本时使用主库，不代表数据库账号只有只读权限。
 func (s *ServiceContext) ReadDB(database DBName) *gorm.DB {
 	if s == nil {
 		return nil
@@ -32,21 +30,12 @@ func (s *ServiceContext) ReadDB(database DBName) *gorm.DB {
 	return readDB(s.SiteDBs.Lookup(database))
 }
 
-// WriteDB 根据数据库名称返回写连接。
+// WriteDB 指定主库路由，用于写操作及写后需要立即读取最新结果的查询。
 func (s *ServiceContext) WriteDB(database DBName) *gorm.DB {
 	if s == nil {
 		return nil
 	}
 	return writeDB(s.SiteDBs.Lookup(database))
-}
-
-// NormalizeDBName 规范化数据库名称，空值统一回退主库。
-func NormalizeDBName(database DBName) DBName {
-	name := strings.TrimSpace(string(database))
-	if name == "" || strings.EqualFold(name, string(DatabaseMain)) {
-		return DatabaseMain
-	}
-	return DBName(name)
 }
 
 // readDB 返回强制走读连接的 GORM 会话。

@@ -9,7 +9,7 @@ description: "治理 Go Redis Key 与缓存契约。用于 Key 收口、共享�
 
 1. 读取生效的 `AGENTS.md`、AI 文档和 `references/project-map.md`，定位现有 Key helper、registry 和静态检查。
 2. 修改调用点前确认 Key 归属、数据结构、基数、TTL、miss 语义、失效与重建路径。
-3. 保持跨服务共享缓存兼容；除非用户明确要求隔离，不添加 repo-name 前缀或改变 hash tag。
+3. 对齐当前跨服务共享缓存契约；不添加 repo-name 前缀或改变 hash tag 来绕开同步，也不为历史格式建立版本前缀、双读双写或兼容分支。
 4. 使用集中 helper 和模板 registry，禁止业务代码散落字符串拼接。
 5. 把高基数 `SCAN`/`KEYS` 替换为精确 Key、索引集合、白名单模板、异步任务或静态 registry。
 6. 多 Key Lua/CAS 逐项核对 Redis Cluster hash tag，保证同一原子操作涉及的 Hash、索引、版本、计数和锁位于同槽。
@@ -30,7 +30,7 @@ python3 <skill-dir>/scripts/redis_key_scan.py <repo-or-dir>
 
 每个新增或改变语义的 Key 按以下契约记录：
 
-模板、归属方、数据形状、基数、TTL、miss、写入和失效/重建是缓存正确性的必填事实；Cluster 同槽和旧 Key 兼容只在多 Key 原子操作或兼容窗口存在时展开。不得为填表臆造永久 Key、迁移期或清理任务。
+模板、归属方、数据形状、基数、TTL、miss、写入和失效/重建是必填事实；多 Key 原子操作核对 Cluster 同槽。只有真实存在的缓存数据受变更影响时，才记录精确失效或重建动作，不为填表臆造历史格式、兼容窗口或清理任务。
 
 ```text
 模板/helper/registry:
@@ -41,10 +41,10 @@ TTL 来源/刷新规则/不过期原因:
 miss 行为与写入顺序:
 失效/重建/失败补偿:
 Cluster hash tag 与 Lua/CAS Keys:
-旧 Key 兼容与清理条件:
+受影响现存 Key 的精确失效或重建:
 测试与静态扫描:
 ```
 
-通过标准：业务代码没有散落拼接，同一语义只有一个 helper；高基数路径不依赖在线 `SCAN/KEYS`；TTL、miss、失效和重建形成确定链路；多 Key 原子操作可证明同槽；旧 Key 的兼容/清理有明确版本条件。任一项未知时标记风险，禁止只写“Redis Key 已收口”。
+通过标准：同一 Key 语义有权威 helper，业务代码没有散落拼接，高基数路径不依赖在线 `SCAN/KEYS`；TTL、miss、失效和重建有确定结果，多 Key 原子操作可证明同槽，受影响的现存数据有明确处置范围与授权。任一项未知时标记风险，不以新增兼容分支替代契约同步。
 
 交付时说明修改文件、调用点、验证命令与结果，以及是否需要回填、清缓存、重建索引集合或补偿。

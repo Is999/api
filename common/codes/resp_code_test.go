@@ -39,13 +39,13 @@ func TestMessageKeyUnknown(t *testing.T) {
 // TestHTTPStatus 验证业务码到 HTTP 状态码的映射。
 func TestHTTPStatus(t *testing.T) {
 	tests := []struct {
-		name string // name 表示测试场景名称。
-		code int    // code 表示待验证业务码。
-		want int    // want 表示期望结果。
+		name string // 区分认证、安全、依赖和未知码回退。
+		code int    // 实际传给响应封装的业务码。
+		want int    // 外部 HTTP 状态，不能与业务码混用。
 	}{
 		{name: "success", code: Success, want: OK},
 		{name: "token invalid", code: TokenInvalid, want: Unauthorized},
-		{name: "security signature", code: SecuritySignatureFailed, want: Unauthorized},
+		{name: "security request", code: SecurityRequestRejected, want: Unauthorized},
 		{name: "security payload too large", code: SecurityPayloadTooLarge, want: 413},
 		{name: "dependency", code: DependencyUnavailable, want: ServiceBusy},
 		{name: "create fail", code: CreateFail, want: ServerError},

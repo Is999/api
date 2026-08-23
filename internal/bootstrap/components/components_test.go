@@ -12,7 +12,14 @@ import (
 
 // TestNewRegistryIncludesCoreDependencies 确保核心依赖进入组件生命周期清单。
 func TestNewRegistryIncludesCoreDependencies(t *testing.T) {
-	cfg := config.Config{Collector: config.CollectorConfig{Enabled: true}}
+	// 构造主库、两个命名扩展库和 Collector，覆盖动态组件清单。
+	cfg := config.Config{Collector: config.CollectorConfig{
+		Enabled: true,
+		Kafka:   config.CollectorKafkaConfig{Brokers: []string{"127.0.0.1:9092"}},
+		Tasks: map[string]config.CollectorTaskConfig{
+			config.CollectorBizTypeAuthSecurity: {Topic: config.CollectorTopicAuthSecurity},
+		},
+	}}
 	svcCtx := svc.NewServiceContext(cfg, "test-version", svc.Dependencies{
 		SiteDBs: svc.SiteDatabases{
 			NamedDBs: map[svc.DBName]*gorm.DB{
@@ -30,6 +37,7 @@ func TestNewRegistryIncludesCoreDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRegistry() error = %v", err)
 	}
+	// 组件必须齐全，命名扩展库还需按名称保持稳定顺序。
 	got := componentItemNames(registry.Items())
 	indexByName := make(map[string]int, len(got))
 	for index, name := range got {

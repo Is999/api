@@ -1,0 +1,4 @@
+interface:
+  display_name: "API 骨架保护"
+  short_description: "保护 API 运行框架、认证安全和跨服务共享契约。"
+  default_prompt: "使用 $foundation-baseline-guard 区分 API 领域业务与核心运行时变更，并审计共享契约影响。"

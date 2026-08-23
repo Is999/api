@@ -10,7 +10,7 @@ import (
 	"api/internal/types"
 )
 
-// UserProfileHandler 获取当前用户资料。
+// UserProfileHandler 只读取鉴权用户的资料，请求参数不能改查其它用户。
 func UserProfileHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		l := userlogic.NewUserLogic(r.Context(), svcCtx)
@@ -18,7 +18,7 @@ func UserProfileHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
-// UserRuntimeSyncHandler 同步后台直改用户表后的 API 运行态缓存。
+// UserRuntimeSyncHandler 接收后台提交后的运行态通知，目标用户只取已校验路径参数。
 func UserRuntimeSyncHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return shared.RespHandler[types.UserRuntimeSyncReq](
 		func(r *http.Request, svcCtx *svc.ServiceContext, req *types.UserRuntimeSyncReq) *types.BizResult {

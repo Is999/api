@@ -21,6 +21,8 @@ const (
 	healthCheckTimeout = 2 * time.Second // 健康检查单项依赖超时时间
 	healthStatusOK     = "ok"            // 健康检查成功状态
 	healthStatusError  = "error"         // 健康检查失败状态
+	// healthDependencyUnavailableMessage 是公开 readiness 响应的稳定文案，原始驱动错误只进入服务端日志和 trace。
+	healthDependencyUnavailableMessage = "依赖不可用"
 )
 
 // HealthLogic 负责 live/ready 健康检查。
@@ -51,6 +53,7 @@ func (l *HealthLogic) Readiness(ctx context.Context) (*types.HealthStatusResp, e
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 先按组件注册顺序构造探测项，缺失注册表也作为明确依赖返回。
 	checks := make([]dependencyCheck, 0, 5)
 
 	if l.service() == nil {
@@ -66,12 +69,12 @@ func (l *HealthLogic) Readiness(ctx context.Context) (*types.HealthStatusResp, e
 			})
 		}
 		for _, component := range items {
-			component := component
 			checks = append(checks, func() (types.HealthDependencyStatus, error) {
 				return l.checkComponent(ctx, component)
 			})
 		}
 	}
+	// 各依赖并行探测，结果仍按注册顺序返回，便于监控稳定展示。
 	statuses, firstErr := runDependencyChecks(checks)
 
 	resp := &types.HealthStatusResp{
@@ -81,6 +84,7 @@ func (l *HealthLogic) Readiness(ctx context.Context) (*types.HealthStatusResp, e
 		Version:      l.currentVersion(),
 		Dependencies: statuses,
 	}
+	// 任一核心依赖失败即将整体 readiness 标记为不可用。
 	if firstErr != nil {
 		resp.Status = healthStatusError
 		return resp, firstErr
@@ -100,6 +104,7 @@ func runDependencyChecks(checks []dependencyCheck) ([]types.HealthDependencyStat
 	for index, check := range checks {
 		go func() {
 			defer wg.Done()
+			// 每个探测只写自己的下标，Wait 后统一读取，无须额外互斥锁。
 			results[index].status, results[index].err = check()
 		}()
 	}
@@ -163,6 +168,7 @@ func (l *HealthLogic) checkComponent(ctx context.Context, component svc.Componen
 		name = "unknown"
 	}
 	if component.Check == nil {
+		// 无探测器表示该组件没有外部就绪条件，不额外发起网络请求。
 		return dependencyOK(name), nil
 	}
 	if ctx == nil {
@@ -170,6 +176,7 @@ func (l *HealthLogic) checkComponent(ctx context.Context, component svc.Componen
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
 	defer cancel()
+	// 组件实现必须响应 context；这里不通过遗留后台协程强行中断探测。
 	if err := component.Check(checkCtx); err != nil {
 		code := component.ErrorCode
 		if code == 0 {
@@ -187,10 +194,6 @@ func dependencyOK(name string) types.HealthDependencyStatus {
 
 // dependencyError 构造 ready 依赖异常状态和可追踪错误。
 func dependencyError(name string, code int, err error) (types.HealthDependencyStatus, error) {
-	message := ""
-	if err != nil {
-		message = err.Error()
-	}
-	status := types.HealthDependencyStatus{Name: name, Status: healthStatusError, Code: code, Message: message}
+	status := types.HealthDependencyStatus{Name: name, Status: healthStatusError, Code: code, Message: healthDependencyUnavailableMessage}
 	return status, errors.Wrapf(err, "ready依赖检查失败 name=%s code=%d", name, code)
 }

@@ -70,6 +70,7 @@ func TestStateStartWatcherClearsAfterRunReturns(t *testing.T) {
 
 // TestStateRejectsRestartUntilStoppingWatcherExits 验证 Stop 等待清理期间不会发布新的 watcher。
 func TestStateRejectsRestartUntilStoppingWatcherExits(t *testing.T) {
+	// watcher 收到取消后继续等待 release，模拟尚未完成的清理阶段。
 	var state State
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
@@ -83,6 +84,7 @@ func TestStateRejectsRestartUntilStoppingWatcherExits(t *testing.T) {
 		t.Fatal("expected watcher to start")
 	}
 	<-started
+	// Stop 进入等待后，生命周期槽位仍必须保持占用。
 	stopDone := make(chan struct{})
 	go func() {
 		_ = state.StopWatcher(context.Background())
@@ -97,6 +99,7 @@ func TestStateRejectsRestartUntilStoppingWatcherExits(t *testing.T) {
 		t.Fatal("StopWatcher returned before watcher cleanup completed")
 	default:
 	}
+	// 清理释放后 Stop 和下一次 Start 才允许成功。
 	close(release)
 	select {
 	case <-stopDone:
@@ -122,10 +125,46 @@ func TestStateImmediateStartStopStress(t *testing.T) {
 	}
 }
 
+// TestStateSuppressFailureWindow 验证重复失败不延长限频窗口，错误变化或恢复后立即重新记录。
+func TestStateSuppressFailureWindow(t *testing.T) {
+	var state State
+	now := time.Unix(100, 0)
+	const window = 30 * time.Second
+
+	if state.SuppressFailure("boom", now, window) {
+		t.Fatal("首次失败不应被抑制")
+	}
+	if !state.SuppressFailure("boom", now.Add(29*time.Second), window) {
+		t.Fatal("窗口内重复失败应被抑制")
+	}
+	// 窗口从首次输出起算，而不是从上次被抑制的失败起算。
+	if state.SuppressFailure("boom", now.Add(window), window) {
+		t.Fatal("到达窗口边界应重新记录")
+	}
+	// 不同错误不共用限频窗口，避免新故障被旧故障掩盖。
+	if state.SuppressFailure("other", now.Add(31*time.Second), window) {
+		t.Fatal("错误变化后应立即记录")
+	}
+	if !state.SuppressFailure("other", now.Add(32*time.Second), window) {
+		t.Fatal("新错误的重复失败应被抑制")
+	}
+	// 成功重载会清空限频状态，同一错误再次发生也应立即记录。
+	state.ResetFailureLog()
+	if state.SuppressFailure("other", now.Add(33*time.Second), window) {
+		t.Fatal("恢复后再次失败应立即记录")
+	}
+}
+
 // TestCheckInterval 验证热加载轮询间隔默认值和显式配置值。
 func TestCheckInterval(t *testing.T) {
+	if got := CheckInterval(-1); got != 5*time.Second {
+		t.Fatalf("interval -1 = %s, want 5s", got)
+	}
 	if got := CheckInterval(0); got != 5*time.Second {
 		t.Fatalf("interval 0 = %s, want 5s", got)
+	}
+	if got := CheckInterval(1); got != time.Second {
+		t.Fatalf("interval 1 = %s, want 1s", got)
 	}
 	if got := CheckInterval(2); got != 2*time.Second {
 		t.Fatalf("interval 2 = %s, want 2s", got)

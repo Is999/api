@@ -13,6 +13,7 @@ import (
 
 // TestProductionCodeRejectsRuntimeFatalCalls 扫描项目自有生产 Go 文件，阻止运行路径重新引入不可恢复退出。
 func TestProductionCodeRejectsRuntimeFatalCalls(t *testing.T) {
+	// 排除测试、依赖、技能和本地数据目录；是否释放资源仍由入口回归验证。
 	moduleRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatalf("解析项目根目录失败: %v", err)
@@ -42,6 +43,7 @@ func TestProductionCodeRejectsRuntimeFatalCalls(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		// 先计算固定初始化和主入口允许项，再检查其余调用位置。
 		imports := importPathByAlias(parsed)
 		allowedMustCalls := packageInitializerMustCalls(parsed, imports)
 		allowedStartupExits := commandMainExitCalls(parsed, relPath, imports)
@@ -53,6 +55,7 @@ func TestProductionCodeRejectsRuntimeFatalCalls(t *testing.T) {
 			}
 		}
 
+		// 标识符、选择器和标准库别名分别覆盖不同绕过形式。
 		ast.Inspect(parsed, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
@@ -174,6 +177,7 @@ func commandMainExitCalls(file *ast.File, relPath string, imports map[string]str
 
 // TestFatalCallClassification 校验固定 Must* 与运行期终止调用分类不会因标准库别名失效。
 func TestFatalCallClassification(t *testing.T) {
+	// 第一段源码同时覆盖固定 Must、动态 Must 和带别名的终止调用。
 	fileSet := token.NewFileSet()
 	parsed, err := parser.ParseFile(fileSet, "common/i18n/catalog.go", `package i18n
 import (
@@ -195,6 +199,7 @@ func runtimePath() { _ = re.MustCompile("runtime"); run.Goexit(); sys.Exit(1) }
 		t.Fatalf("允许的固定包初始化调用数量 = %d，期望 1", len(allowed))
 	}
 
+	// 运行期终止调用必须独立识别，不能被包级 Must 白名单吞掉。
 	var runtimeTerminators int
 	ast.Inspect(parsed, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
@@ -214,6 +219,7 @@ func runtimePath() { _ = re.MustCompile("runtime"); run.Goexit(); sys.Exit(1) }
 		t.Fatalf("识别的进程终止调用数量 = %d，期望 2", runtimeTerminators)
 	}
 
+	// 第二段源码验证只有 main 中同步且独立的退出语句可被放行。
 	mainFile, err := parser.ParseFile(fileSet, "cmd/example/main.go", `package main
 import process "os"
 func main() {
@@ -232,6 +238,7 @@ func helper() { process.Exit(1) }
 		t.Fatalf("允许的命令入口同步直接退出调用数量 = %d，期望 2", got)
 	}
 
+	// 最后锁定所有禁止名称的直接调用和选择器调用分类。
 	for _, name := range []string{"panic", "Fatal", "Fatalw", "Panic", "Panicw", "MustCompile", "MustRegister"} {
 		if !isFatalIdentifier(ast.NewIdent(name)) {
 			t.Fatalf("未识别直接致命调用名称 %s", name)

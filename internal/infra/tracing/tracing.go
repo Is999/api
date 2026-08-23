@@ -2,7 +2,8 @@ package tracing
 
 import (
 	"context"
-	"net/url"
+	"net"
+	"strconv"
 	"strings"
 
 	"api/internal/config"
@@ -19,13 +20,29 @@ import (
 
 // Setup 初始化 OpenTelemetry provider。
 func Setup(ctx context.Context, cfg config.ObservabilityConfig) (func(context.Context) error, error) {
-	serviceName := strings.TrimSpace(cfg.ServiceName)
+	serviceName := cfg.ServiceName
+	if serviceName != strings.TrimSpace(serviceName) {
+		return nil, errors.Errorf("observability.service_name 不能包含首尾空白")
+	}
 	if serviceName == "" {
 		serviceName = "api"
 	}
-	environment := strings.TrimSpace(cfg.Environment)
+	environment := cfg.Environment
+	if environment != strings.TrimSpace(environment) {
+		return nil, errors.Errorf("observability.environment 不能包含首尾空白")
+	}
 	if environment == "" {
 		environment = "unknown"
+	}
+	protocol := cfg.OTLPProtocol
+	if protocol == "" {
+		protocol = "grpc"
+	}
+	if protocol != "grpc" && protocol != "http" {
+		return nil, errors.Errorf("不支持的 otlp_protocol: %s", cfg.OTLPProtocol)
+	}
+	if err := validateOTLPEndpoint(cfg.OTLPEndpoint); err != nil {
+		return nil, errors.Tag(err)
 	}
 
 	resource, err := sdkresource.New(ctx,
@@ -43,6 +60,7 @@ func Setup(ctx context.Context, cfg config.ObservabilityConfig) (func(context.Co
 		return nil, errors.Errorf("observability.sample_ratio 必须在 0-1 之间")
 	}
 	if !cfg.TraceEnabled {
+		// 关闭 tracing 时仍注册 provider，但强制使用零采样率。
 		sampleRatio = 0
 	}
 
@@ -50,12 +68,11 @@ func Setup(ctx context.Context, cfg config.ObservabilityConfig) (func(context.Co
 		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(sampleRatio)),
 		sdktrace.WithResource(resource),
 	}
+	// 未配置端点时保留本地 span 上下文，不创建网络导出器。
 	if cfg.TraceEnabled && cfg.OTLPEndpoint != "" {
-		protocol := normalizeOTLPProtocol(cfg.OTLPProtocol)
 		switch protocol {
 		case "grpc":
-			endpoint, _ := normalizeOTLPEndpoint(cfg.OTLPEndpoint)
-			exporterOpts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(endpoint)}
+			exporterOpts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint)}
 			if cfg.OTLPInsecure {
 				exporterOpts = append(exporterOpts, otlptracegrpc.WithInsecure())
 			}
@@ -65,13 +82,9 @@ func Setup(ctx context.Context, cfg config.ObservabilityConfig) (func(context.Co
 			}
 			options = append(options, sdktrace.WithBatcher(exporter))
 		case "http":
-			endpoint, urlPath := normalizeOTLPEndpoint(cfg.OTLPEndpoint)
-			if urlPath == "" {
-				urlPath = "/v1/traces"
-			}
 			exporterOpts := []otlptracehttp.Option{
-				otlptracehttp.WithEndpoint(endpoint),
-				otlptracehttp.WithURLPath(urlPath),
+				otlptracehttp.WithEndpoint(cfg.OTLPEndpoint),
+				otlptracehttp.WithURLPath("/v1/traces"),
 			}
 			if cfg.OTLPInsecure {
 				exporterOpts = append(exporterOpts, otlptracehttp.WithInsecure())
@@ -81,56 +94,35 @@ func Setup(ctx context.Context, cfg config.ObservabilityConfig) (func(context.Co
 				return nil, errors.Wrap(err, "初始化 OTLP 导出器失败")
 			}
 			options = append(options, sdktrace.WithBatcher(exporter))
-		default:
-			return nil, errors.Errorf("不支持的 otlp_protocol: %s", strings.TrimSpace(cfg.OTLPProtocol))
 		}
 	}
 
+	// exporter 初始化成功后再替换全局 provider，避免失败启动污染进程状态。
 	tp := sdktrace.NewTracerProvider(options...)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
+	// 调用方在资源关闭阶段执行 Shutdown，刷出尚未导出的批量 span。
 	return tp.Shutdown, nil
 }
 
-// normalizeOTLPProtocol 归一化 OTLP 协议别名。
-func normalizeOTLPProtocol(protocol string) string {
-	protocol = strings.TrimSpace(strings.ToLower(protocol))
-	switch protocol {
-	case "", "grpc", "grpc/protobuf":
-		return "grpc"
-	case "http", "http/protobuf", "http-protobuf":
-		return "http"
-	default:
-		return protocol
-	}
-}
-
-// normalizeOTLPEndpoint 拆分 OTLP endpoint 的 host 和 path。
-func normalizeOTLPEndpoint(endpoint string) (string, string) {
-	endpoint = strings.TrimSpace(endpoint)
+// validateOTLPEndpoint 校验直接装配也只能使用唯一的 host:port 地址形态。
+func validateOTLPEndpoint(endpoint string) error {
 	if endpoint == "" {
-		return "", ""
+		return nil
 	}
-	if strings.Contains(endpoint, "://") {
-		u, err := url.Parse(endpoint)
-		if err == nil && u.Host != "" {
-			path := strings.TrimSpace(u.Path)
-			if path == "" || path == "/" {
-				path = ""
-			}
-			return u.Host, path
-		}
+	if endpoint != strings.TrimSpace(endpoint) {
+		return errors.Errorf("observability.otlp_endpoint 不能包含首尾空白")
 	}
-	if idx := strings.Index(endpoint, "/"); idx > 0 {
-		host := strings.TrimSpace(endpoint[:idx])
-		path := strings.TrimSpace(endpoint[idx:])
-		if path == "" || path == "/" {
-			path = ""
-		}
-		return host, path
+	host, portText, err := net.SplitHostPort(endpoint)
+	if err != nil || host == "" {
+		return errors.Errorf("observability.otlp_endpoint 必须使用 host:port 形态")
 	}
-	return endpoint, ""
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return errors.Errorf("observability.otlp_endpoint 端口必须在 1-65535 之间")
+	}
+	return nil
 }

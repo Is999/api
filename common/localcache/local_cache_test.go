@@ -1,9 +1,45 @@
 package localcache
 
 import (
+	"math"
 	"testing"
 	"time"
 )
+
+// TestNewRejectsOverflowingTicker 确保清理间隔在创建后台 ticker 前完成整数边界校验。
+func TestNewRejectsOverflowingTicker(t *testing.T) {
+	for _, test := range []struct {
+		name    string // 区分缺省语义、有效边界与溢出输入。
+		seconds int64  // 调用方传入的清理间隔秒数。
+		wantErr bool   // 超出 Duration 表示范围时必须返回错误。
+	}{
+		{name: "negative_default", seconds: -1},
+		{name: "zero_default"},
+		{name: "minimum", seconds: 1},
+		{name: "maximum", seconds: math.MaxInt64 / int64(time.Second)},
+		{name: "above_maximum", seconds: math.MaxInt64/int64(time.Second) + 1, wantErr: true},
+		{name: "overflow", seconds: math.MaxInt64, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cache, err := New[string, string](Options{TTLTickerDurationSeconds: test.seconds})
+			if cache != nil {
+				t.Cleanup(cache.Close)
+			}
+			if (err != nil) != test.wantErr {
+				t.Fatalf("New() error = %v, wantErr = %v", err, test.wantErr)
+			}
+			if test.wantErr {
+				if cache != nil {
+					t.Fatal("非法清理间隔不应创建缓存")
+				}
+				return
+			}
+			if cache == nil {
+				t.Fatal("合法清理间隔应创建缓存")
+			}
+		})
+	}
+}
 
 // TestCacheSetGetAndMetrics 验证基础读写、删除和指标快照。
 func TestCacheSetGetAndMetrics(t *testing.T) {
@@ -17,9 +53,11 @@ func TestCacheSetGetAndMetrics(t *testing.T) {
 	}
 	defer cache.Close()
 
+	// 写入完成后验证普通读取和无期限 TTL 语义。
 	if ok := cache.Set("local:cache:key", "value"); !ok {
 		t.Fatal("Set() = false")
 	}
+	// Ristretto 异步接收写入，读断言前先排空缓冲，避免把调度延迟当作 miss。
 	cache.Wait()
 
 	value, ok := cache.Get("local:cache:key")
@@ -30,6 +68,7 @@ func TestCacheSetGetAndMetrics(t *testing.T) {
 		t.Fatal("GetTTL() should find key without expiration")
 	}
 
+	// 删除后制造一次 miss，再核对命中和未命中指标均已累计。
 	cache.Del("local:cache:key")
 	cache.Wait()
 	if _, ok = cache.Get("local:cache:key"); ok {

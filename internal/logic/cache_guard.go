@@ -23,7 +23,7 @@ func JitterTTL(base time.Duration) time.Duration {
 	return base + time.Duration(time.Now().UnixNano()%int64(jitterRange))
 }
 
-// EmptyCacheTTL 返回空值缓存的过期时间。
+// EmptyCacheTTL 为不存在的数据缓存约两分钟，并增加不超过 10% 的过期抖动。
 func EmptyCacheTTL() time.Duration {
 	return JitterTTL(2 * time.Minute)
 }

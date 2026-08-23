@@ -22,7 +22,9 @@ var (
 
 // SegmentResolver 按业务命名空间提供 Redis 号段 ID。
 type SegmentResolver interface {
+	// SegmentEnabled 判断 namespace 是否强制使用号段 ID。
 	SegmentEnabled(namespace string) bool
+	// SegmentID 从对应号段取 ID，失败时直接返回错误且不降级到雪花。
 	SegmentID(namespace string) (int64, error)
 }
 
@@ -74,6 +76,7 @@ func nextSegmentID(namespace string, resolver SegmentResolver, token uint64) (in
 	if err != nil {
 		return 0, errors.Tag(err)
 	}
+	// 取号期间若旧解析器已关闭，该结果不再交付给业务请求。
 	if !segmentResolverActive(token) {
 		return 0, errors.Errorf("ID Segment 解析器已关闭 namespace=%s", namespace)
 	}

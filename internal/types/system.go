@@ -17,8 +17,8 @@ type ConfigReloadStatusResp struct {
 	ConfigSummary          string    `json:"configSummary"`          // 当前配置摘要
 	RestartRequired        bool      `json:"restartRequired"`        // 是否需要重启才能完全生效
 	RestartReason          string    `json:"restartReason"`          // 需要重启的原因摘要
-	LastStatus             string    `json:"lastStatus"`             // 最近一次处理结果
-	LastMessage            string    `json:"lastMessage"`            // 最近一次处理结果说明
+	LastStatus             string    `json:"lastStatus"`             // 最近一次重载状态：idle、success 或 failed
+	LastMessage            string    `json:"lastMessage"`            // 最近一次重载结果的可读说明
 	LastTriggerSource      string    `json:"lastTriggerSource"`      // 最近一次触发来源
 	LastFailureCategory    string    `json:"lastFailureCategory"`    // 最近一次失败分类
 	LastCheckedAt          time.Time `json:"lastCheckedAt"`          // 最近一次检查时间
@@ -91,7 +91,7 @@ type ConfigItemQueryResp struct {
 	SensitiveTotal int                 `json:"sensitiveTotal"`    // 当前快照敏感配置项总数
 	Sections       []ConfigSectionStat `json:"sections"`          // 顶层配置分组统计
 	Source         ConfigSourceMeta    `json:"source"`            // 当前运行态快照来源
-	SnapshotYAML   string              `json:"snapshotYaml"`      // 完整脱敏 YAML 快照
+	SnapshotYAML   string              `json:"snapshotYaml"`      // 脱敏 YAML 快照，保留数字零值与 false
 	RuntimeYAML    string              `json:"runtimeYaml"`       // 运行期外部配置的脱敏 YAML 视图
 	Items          []ConfigItem        `json:"items"`             // 当前页配置项
 }

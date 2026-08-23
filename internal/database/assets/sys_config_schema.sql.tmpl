@@ -1,8 +1,8 @@
 -- 代码资产：创建运行期系统配置表，表名固定为 sys_config。
 -- SQL 方言：MySQL 8.0 InnoDB。
--- 调用方：internal/database.SysConfigSchemaSQL 通过 go:embed 加载，并先剥离本说明再返回可执行 SQL。
+-- 调用方：internal/database.DefaultMigrations 通过 readMigrationSQL 加载，剥离文件头后交由初始化 runner 执行。
 -- 参数来源：无动态参数；DDL 固定创建 sys_config 表。
--- 安全边界：仅用于初始化或迁移；上线前确认 uuid 唯一索引不会与历史配置冲突。
+-- 安全边界：仅补建不存在的表，不修改已有表结构或数据；未登记资产可由初始化命令幂等续跑。
 CREATE TABLE IF NOT EXISTS `sys_config` (
   `id` int unsigned NOT NULL AUTO_INCREMENT COMMENT '主键',
   `uuid` varchar(100) NOT NULL COMMENT '配置唯一标识,命名规则(驼峰)：项目名+key',

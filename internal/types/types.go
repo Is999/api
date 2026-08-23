@@ -3,11 +3,8 @@
 package types
 
 import (
-	"context"
-
 	codes "api/common/codes"
 	i18n "api/common/i18n"
-	"api/internal/requestctx"
 
 	"github.com/Is999/go-utils/errors"
 )
@@ -26,8 +23,8 @@ type BizResult struct {
 	Code        int    `json:"-"` // 响应代码
 	MessageKey  string `json:"-"` // 国际化消息 key
 	MessageArgs []any  `json:"-"` // 国际化消息参数
-	Error       error  `json:"-"` // 错误信息
-	Req         any    `json:"-"` // 请求参数
+	Error       error  `json:"-"` // 内部错误链；Nil 表示无需记录原因的显式业务失败
+	Req         any    `json:"-"` // 请求内保留原始参数，可能含密码或 token，不能直接写日志
 	Data        any    `json:"-"` // 响应数据
 }
 
@@ -100,13 +97,12 @@ func ParamErrorResult(err error) *BizResult {
 }
 
 // ResolveMessage 按“MessageKey > Code 默认文案”的优先级解析最终响应文案。
-func (r *BizResult) ResolveMessage(ctx context.Context) string {
+func (r *BizResult) ResolveMessage(locale string) string {
 	if r == nil {
 		return ""
 	}
-	locale := i18n.LocaleZHCN
-	if meta := requestctx.FromContext(ctx); meta != nil && meta.Locale != "" {
-		locale = meta.Locale
+	if locale == "" {
+		locale = i18n.LocaleZHCN
 	}
 	if r.MessageKey != "" {
 		return i18n.MessageByKey(r.MessageKey, locale, r.MessageArgs...)

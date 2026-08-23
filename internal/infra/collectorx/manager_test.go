@@ -3,6 +3,8 @@ package collectorx
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -22,13 +24,101 @@ type fakeKafkaWriter struct {
 	closed     bool            // 是否已关闭
 }
 
+// TestNewRejectsUnboundedKafkaWriters 确保直接构造 Manager 也不能绕过 Writer 数量硬上限。
+func TestNewRejectsUnboundedKafkaWriters(t *testing.T) {
+	cfg := config.CollectorConfig{
+		Enabled: true,
+		Kafka:   config.CollectorKafkaConfig{Brokers: []string{"127.0.0.1:9092"}},
+		Tasks:   make(map[string]config.CollectorTaskConfig, config.MaxCollectorTopicCount+1),
+	}
+	for i := 0; i <= config.MaxCollectorTopicCount; i++ {
+		cfg.Tasks[fmt.Sprintf("biz-%d", i)] = config.CollectorTaskConfig{Topic: fmt.Sprintf("topic-%d", i)}
+	}
+	if _, err := New(cfg); err == nil {
+		t.Fatal("expected excessive Kafka writers to be rejected")
+	}
+}
+
+// TestNewRejectsNonCanonicalConfig 确保直接构造入口不会清洗并接受错误 Kafka 配置。
+func TestNewRejectsNonCanonicalConfig(t *testing.T) {
+	tests := []config.CollectorConfig{
+		{Enabled: true, Kafka: config.CollectorKafkaConfig{Brokers: []string{" 127.0.0.1:9092"}}, Tasks: map[string]config.CollectorTaskConfig{"login": {Topic: "events"}}},
+		{Enabled: true, Kafka: config.CollectorKafkaConfig{Brokers: []string{"127.0.0.1:9092", "127.0.0.1:9092"}}, Tasks: map[string]config.CollectorTaskConfig{"login": {Topic: "events"}}},
+		{Enabled: true, Kafka: config.CollectorKafkaConfig{Brokers: []string{"127.0.0.1:9092"}}, Tasks: map[string]config.CollectorTaskConfig{" login": {Topic: "events"}}},
+		{Enabled: true, Kafka: config.CollectorKafkaConfig{Brokers: []string{"127.0.0.1:9092"}}, Tasks: map[string]config.CollectorTaskConfig{"login": {Topic: " events"}}},
+	}
+	for _, cfg := range tests {
+		if _, err := New(cfg); err == nil {
+			t.Fatalf("expected non-canonical collector config to be rejected: %+v", cfg)
+		}
+	}
+}
+
+// TestNewKafkaDurationBoundaries 确保直接构造入口在单位换算前拒绝越界整数。
+func TestNewKafkaDurationBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name    string // 区分默认值、有效边界及溢出输入。
+		wait    int    // Producer 聚合等待，单位毫秒。
+		timeout int    // Producer 写入超时，单位秒。
+		wantErr bool   // 非法配置必须在创建 writer 前失败。
+	}{
+		{name: "defaults"},
+		{name: "minimum", wait: 1, timeout: 1},
+		{name: "maximum", wait: 5000, timeout: 30},
+		{name: "negative_wait", wait: -1, wantErr: true},
+		{name: "excessive_wait", wait: 5001, wantErr: true},
+		{name: "overflow_wait", wait: math.MaxInt, wantErr: true},
+		{name: "negative_timeout", timeout: -1, wantErr: true},
+		{name: "excessive_timeout", timeout: 31, wantErr: true},
+		{name: "overflow_timeout", timeout: math.MaxInt, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, err := New(config.CollectorConfig{
+				Enabled: true,
+				Kafka: config.CollectorKafkaConfig{
+					Brokers:                    []string{"127.0.0.1:9092"},
+					WriteBatchWaitMilliseconds: test.wait,
+					WriteTimeout:               test.timeout,
+				},
+				Tasks: map[string]config.CollectorTaskConfig{"login": {Topic: "events"}},
+			})
+			if manager != nil {
+				t.Cleanup(func() {
+					// Cleanup 在测试上下文取消后执行，独立短期限保证 writer 仍被收口。
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					defer cancel()
+					if err := manager.Close(ctx); err != nil {
+						t.Errorf("关闭测试 writer 失败: %v", err)
+					}
+				})
+			}
+			if (err != nil) != test.wantErr {
+				t.Fatalf("New() error = %v, wantErr = %v", err, test.wantErr)
+			}
+			if test.wantErr {
+				return
+			}
+			// 不发送消息；直接核对正式 writer 的默认值和单位换算，不依赖 Kafka。
+			writer := manager.writers["events"].(*kafka.Writer)
+			wantWait := time.Duration(test.wait) * time.Millisecond
+			wantTimeout := time.Duration(test.timeout) * time.Second
+			if test.wait == 0 {
+				wantWait = 20 * time.Millisecond
+			}
+			if test.timeout == 0 {
+				wantTimeout = 3 * time.Second
+			}
+			if writer.BatchTimeout != wantWait || writer.WriteTimeout != wantTimeout {
+				t.Fatalf("writer 等待/超时 = %s/%s，期望 %s/%s", writer.BatchTimeout, writer.WriteTimeout, wantWait, wantTimeout)
+			}
+		})
+	}
+}
+
 // TestManagerReadyRejectsMissingKafkaWriter 确保启用 Collector 后没有可用 Topic 时不会误报就绪。
 func TestManagerReadyRejectsMissingKafkaWriter(t *testing.T) {
-	manager, err := New(config.CollectorConfig{Enabled: true})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	if err = manager.Ready(context.Background()); err == nil {
+	manager := &Manager{cfg: config.CollectorConfig{Enabled: true}, writers: map[string]kafkaMessageWriter{}}
+	if err := manager.Ready(context.Background()); err == nil {
 		t.Fatal("Ready() expected missing Kafka writer error")
 	}
 }
@@ -53,6 +143,7 @@ func (f *fakeKafkaWriter) Close() error {
 
 // TestManagerEnqueuePublishesKafkaMessage 验证 Collector 按 bizType 和 partitionKey 写入 Kafka。
 func TestManagerEnqueuePublishesKafkaMessage(t *testing.T) {
+	// 假 writer 记录编码后的消息，避免单测连接真实 Kafka。
 	manager, writer := newKafkaManagerForTest(t, config.CollectorConfig{
 		Enabled: true,
 		Kafka: config.CollectorKafkaConfig{
@@ -64,7 +155,7 @@ func TestManagerEnqueuePublishesKafkaMessage(t *testing.T) {
 	}, "collector_events")
 
 	eventID, err := manager.Enqueue(context.Background(), Event{
-		BizType:      " login ",
+		BizType:      "login",
 		PartitionKey: "user-1",
 		Payload:      json.RawMessage(`{"uid":1}`),
 	})
@@ -80,6 +171,7 @@ func TestManagerEnqueuePublishesKafkaMessage(t *testing.T) {
 	if got := string(writer.messages[0].Key); got != "login:user-1" {
 		t.Fatalf("message key = %q, want login:user-1", got)
 	}
+	// Kafka key 必须稳定分区，消息体则保留生成的事件 ID 和业务类型。
 	var got Event
 	if err := json.Unmarshal(writer.messages[0].Value, &got); err != nil {
 		t.Fatalf("Unmarshal(message) error = %v", err)
@@ -141,6 +233,7 @@ func TestManagerEnqueueRejectsInvalidPayload(t *testing.T) {
 // TestManagerEnqueueRejectsEventsOutsideContract 确保 API 不会写出 Admin 必然拒绝的事件。
 func TestManagerEnqueueRejectsEventsOutsideContract(t *testing.T) {
 	oversizedPayload := json.RawMessage(`"` + strings.Repeat("a", maxCollectorPayloadBytes-1) + `"`)
+	// JSON Marshal 把 '<' 转为六字节转义；原 payload 未超限也可能让外层 Kafka 信封突破总字节预算。
 	escapedMessagePayload := json.RawMessage(`"` + strings.Repeat("<", 12000) + `"`)
 	tests := []struct {
 		name  string // 测试场景名称
@@ -149,6 +242,9 @@ func TestManagerEnqueueRejectsEventsOutsideContract(t *testing.T) {
 	}{
 		{name: "event id 字节超限", event: Event{EventID: strings.Repeat("界", 22), BizType: "login"}, want: "64 字节"},
 		{name: "event id UTF-8 无效", event: Event{EventID: string([]byte{0xff}), BizType: "login"}, want: "UTF-8"},
+		{name: "event id 首尾空白", event: Event{EventID: " event-1", BizType: "login"}, want: "eventId"},
+		{name: "biz type 首尾空白", event: Event{EventID: "event-1", BizType: " login "}, want: "bizType"},
+		{name: "partition key 首尾空白", event: Event{EventID: "event-1", BizType: "login", PartitionKey: " user-1"}, want: "partitionKey"},
 		{name: "biz type 字节超限", event: Event{EventID: "event-1", BizType: strings.Repeat("b", maxCollectorBizTypeBytes+1)}, want: "100 字节"},
 		{name: "partition key 字节超限", event: Event{EventID: "event-1", BizType: "login", PartitionKey: strings.Repeat("p", maxCollectorPartitionKeyBytes+1)}, want: "128 字节"},
 		{name: "payload 字节超限", event: Event{EventID: "event-1", BizType: "login", Payload: oversizedPayload}, want: "61440 字节"},
@@ -178,7 +274,7 @@ func TestManagerEnqueueRejectsEventsOutsideContract(t *testing.T) {
 	}
 }
 
-// TestManagerEnqueueAcceptsContractBoundary 确保 API 与 Admin 对精确事件边界的判断一致。
+// TestManagerEnqueueAcceptsContractBoundary 验证 API 接受当前声明的字节边界；消费端同契约由 Admin 的独立用例覆盖。
 func TestManagerEnqueueAcceptsContractBoundary(t *testing.T) {
 	event := Event{
 		EventID:      strings.Repeat("界", 21) + "e",
@@ -224,27 +320,9 @@ func TestManagerEnqueueRejectsUnconfiguredBizType(t *testing.T) {
 	}
 }
 
-// TestNewNormalizesKafkaBrokers 确保 writer 和 readiness 使用清理后的 broker 地址。
-func TestNewNormalizesKafkaBrokers(t *testing.T) {
-	manager, err := New(config.CollectorConfig{
-		Enabled: true,
-		Kafka: config.CollectorKafkaConfig{
-			Brokers: []string{" kafka:9092 ", " "},
-		},
-		Tasks: map[string]config.CollectorTaskConfig{
-			"login": {Topic: "collector_events"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	if len(manager.cfg.Kafka.Brokers) != 1 || manager.cfg.Kafka.Brokers[0] != "kafka:9092" {
-		t.Fatalf("Kafka brokers = %#v", manager.cfg.Kafka.Brokers)
-	}
-}
-
 // TestManagerEnqueueReportsKafkaPublishAlert 验证 Kafka 写失败会上报低基数运行异常。
 func TestManagerEnqueueReportsKafkaPublishAlert(t *testing.T) {
+	// 注入 broker 写失败，并通过 hook 捕获低基数告警。
 	manager, writer := newKafkaManagerForTest(t, config.CollectorConfig{
 		Enabled: true,
 		Kafka: config.CollectorKafkaConfig{
@@ -260,6 +338,7 @@ func TestManagerEnqueueReportsKafkaPublishAlert(t *testing.T) {
 	manager.SetAlertHook(func(ctx context.Context, alert RuntimeAlert) {
 		got = alert
 	})
+	// 投递错误必须原样返回，同时生成可聚合的告警指纹。
 	_, err := manager.Enqueue(context.Background(), Event{
 		BizType: BizTypeAuthSecurity,
 		Payload: json.RawMessage(`{"uid":1}`),
@@ -319,7 +398,7 @@ func TestManagerCloseHonorsContextDeadline(t *testing.T) {
 	close(closeBlock)
 }
 
-// newKafkaManagerForTest 构造替换了 fake writer 的 Manager。
+// newKafkaManagerForTest 在首次写入前替换延迟建连的 writer；9092 仅占位配置，不证明 broker 发布、ACK 或跨服务消费。
 func newKafkaManagerForTest(t *testing.T, cfg config.CollectorConfig, topic string) (*Manager, *fakeKafkaWriter) {
 	t.Helper()
 	manager, err := New(cfg)

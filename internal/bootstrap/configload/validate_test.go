@@ -1,10 +1,14 @@
 package configload
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"api/common/idgen"
 	"api/internal/config"
+
+	"github.com/zeromicro/go-zero/rest"
 )
 
 // TestValidateConfigRejectsWeakJWTSecret 确保明显弱 JWT 密钥不能通过启动校验。
@@ -13,6 +17,145 @@ func TestValidateConfigRejectsWeakJWTSecret(t *testing.T) {
 	cfg.JwtSecret = "short"
 	if err := Validate(cfg); err == nil {
 		t.Fatal("expected weak jwt_secret to be rejected")
+	}
+}
+
+// TestValidateConfigRejectsMissingPersistentRootKey 确保所有模式在接收联系方式请求前已具备持久数据根密钥。
+func TestValidateConfigRejectsMissingPersistentRootKey(t *testing.T) {
+	for _, appKey := range []string{"", "short", " app-key-0123456789 ", "app-key-0123456789\n"} {
+		cfg := validBootstrapConfig()
+		cfg.AppKey = appKey
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "app_key") {
+			t.Fatalf("期望 app_key=%q 被拒绝，实际为 %v", appKey, err)
+		}
+	}
+}
+
+// TestValidateConfigRejectsJWTWhitespace 确保签发和验签不会因密钥被静默 trim 而形成第二套配置语义。
+func TestValidateConfigRejectsJWTWhitespace(t *testing.T) {
+	cfg := validBootstrapConfig()
+	cfg.JwtSecret = " test-secret-0123456789 "
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "jwt_secret") {
+		t.Fatalf("期望包含首尾空白的 jwt_secret 被拒绝，实际为 %v", err)
+	}
+}
+
+// TestValidateConfigRejectsNonCanonicalMode 确保运行模式只接受配置枚举声明的规范值。
+func TestValidateConfigRejectsNonCanonicalMode(t *testing.T) {
+	for _, mode := range []string{"", "prod", "production", "PRO", " dev ", "unknown"} {
+		cfg := validBootstrapConfig()
+		cfg.Mode = mode
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "Mode") {
+			t.Fatalf("期望 Mode=%q 被拒绝，实际为 %v", mode, err)
+		}
+	}
+}
+
+// TestValidateConfigRejectsNonCanonicalHTTPListener 确保实际监听和启动探测使用同一 Host/Port。
+func TestValidateConfigRejectsNonCanonicalHTTPListener(t *testing.T) {
+	for _, edit := range []func(*config.Config){
+		func(cfg *config.Config) { cfg.Host = " 127.0.0.1 " },
+		func(cfg *config.Config) { cfg.Host = "" },
+		func(cfg *config.Config) { cfg.Port = 0 },
+		func(cfg *config.Config) { cfg.Port = 65536 },
+	} {
+		cfg := validBootstrapConfig()
+		edit(&cfg)
+		if err := Validate(cfg); err == nil {
+			t.Fatal("expected invalid HTTP listener error")
+		}
+	}
+}
+
+// TestValidateConfigAcceptsDeclaredModes 确保文档声明的五种规范模式均走确定校验分支。
+func TestValidateConfigAcceptsDeclaredModes(t *testing.T) {
+	for _, mode := range []string{config.ModeDevelopment, config.ModeTest, config.ModeRuntimeTest, config.ModePreRelease} {
+		cfg := validBootstrapConfig()
+		cfg.Mode = mode
+		if err := Validate(cfg); err != nil {
+			t.Fatalf("期望 Mode=%q 通过，实际为 %v", mode, err)
+		}
+	}
+	if err := Validate(validProductionBootstrapConfig()); err != nil {
+		t.Fatalf("期望生产规范模式通过，实际为 %v", err)
+	}
+}
+
+// TestValidateConfigRejectsUnsafeJWTExpiry 确保登录态 TTL 不会溢出 duration 或形成超长期令牌。
+func TestValidateConfigRejectsUnsafeJWTExpiry(t *testing.T) {
+	for _, expiresIn := range []int64{-1, config.MaxJWTExpiresInSeconds + 1} {
+		cfg := validBootstrapConfig()
+		cfg.JwtExpiresIn = expiresIn
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "jwt_expires_in") {
+			t.Fatalf("期望 jwt_expires_in=%d 返回边界错误，实际为 %v", expiresIn, err)
+		}
+	}
+	for _, expiresIn := range []int64{1, config.MaxJWTExpiresInSeconds} {
+		cfg := validBootstrapConfig()
+		cfg.JwtExpiresIn = expiresIn
+		if err := Validate(cfg); err != nil {
+			t.Fatalf("期望 jwt_expires_in=%d 通过，实际为 %v", expiresIn, err)
+		}
+	}
+}
+
+// TestValidateConfigRejectsUnsafeMySQLPools 确保主库和读副本都使用有界连接池配置。
+func TestValidateConfigRejectsUnsafeMySQLPools(t *testing.T) {
+	tests := []struct {
+		name string               // name 表示连接池错误场景。
+		edit func(*config.Config) // edit 注入待验证的配置错误。
+		want string               // want 是期望错误字段。
+	}{
+		{name: "missing write dsn", edit: func(cfg *config.Config) { cfg.MySQL.WriteDataSource = "" }, want: "write_data_source"},
+		{name: "unlimited open", edit: func(cfg *config.Config) { cfg.MySQL.MaxOpenConns = 0 }, want: "max_open_conns"},
+		{name: "idle over open", edit: func(cfg *config.Config) { cfg.MySQL.MaxIdleConns = cfg.MySQL.MaxOpenConns + 1 }, want: "max_idle_conns"},
+		{name: "missing lifetime", edit: func(cfg *config.Config) { cfg.MySQL.ConnMaxLifetime = 0 }, want: "conn_max_lifetime"},
+		{name: "too many replicas", edit: func(cfg *config.Config) {
+			cfg.MySQL.ReadDataSources = make([]string, config.MaxMySQLReadDataSourceCount+1)
+			for index := range cfg.MySQL.ReadDataSources {
+				cfg.MySQL.ReadDataSources[index] = fmt.Sprintf("user:password@tcp(127.0.0.1:3306)/replica_%d", index)
+			}
+		}, want: "read_data_sources"},
+		{name: "duplicate replica", edit: func(cfg *config.Config) {
+			cfg.MySQL.ReadDataSources = []string{"user:password@tcp(127.0.0.1:3306)/replica", "user:password@tcp(127.0.0.1:3306)/replica"}
+		}, want: "重复"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validBootstrapConfig()
+			tt.edit(&cfg)
+			if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("期望 MySQL 配置返回包含 %q 的错误，实际为 %v", tt.want, err)
+			}
+		})
+	}
+}
+
+// TestValidateConfigRejectsUnsafeSiteMySQL 确保命名库数量、名称和连接池都不能绕过主库规则。
+func TestValidateConfigRejectsUnsafeSiteMySQL(t *testing.T) {
+	for _, name := range []string{" log ", "MAIN", "main", "archive:old"} {
+		cfg := validBootstrapConfig()
+		cfg.SiteMySQL = config.SiteMySQLConfig{name: validMySQLConfig("archive")}
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "site_mysql") {
+			t.Fatalf("期望 site_mysql 名称 %q 返回错误，实际为 %v", name, err)
+		}
+	}
+	cfg := validBootstrapConfig()
+	cfg.SiteMySQL = config.SiteMySQLConfig{"archive": validMySQLConfig("archive")}
+	invalid := cfg.SiteMySQL["archive"]
+	invalid.MaxOpenConns = 0
+	cfg.SiteMySQL["archive"] = invalid
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "site_mysql.archive.max_open_conns") {
+		t.Fatalf("期望命名库无界连接池返回错误，实际为 %v", err)
+	}
+	many := validBootstrapConfig()
+	many.SiteMySQL = make(config.SiteMySQLConfig, maxSiteMySQLCount+1)
+	for index := 0; index <= maxSiteMySQLCount; index++ {
+		name := fmt.Sprintf("archive_%d", index)
+		many.SiteMySQL[name] = validMySQLConfig(name)
+	}
+	if err := Validate(many); err == nil || !strings.Contains(err.Error(), "site_mysql 不能超过") {
+		t.Fatalf("期望过多命名库返回数量上限错误，实际为 %v", err)
 	}
 }
 
@@ -48,6 +191,28 @@ func TestValidateConfigRejectsInvalidTrustedProxy(t *testing.T) {
 	}
 }
 
+// TestValidateConfigRejectsNonCanonicalTrustedProxies 确保公共解析器不会静默丢弃空项或合并重复规则。
+func TestValidateConfigRejectsNonCanonicalTrustedProxies(t *testing.T) {
+	for _, proxies := range [][]string{{""}, {" 10.0.0.0/8"}, {"10.0.0.0/8", "10.0.0.0/8"}} {
+		cfg := validBootstrapConfig()
+		cfg.TrustedProxies = proxies
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "trusted_proxies") {
+			t.Fatalf("期望 trusted_proxies=%q 被拒绝，实际为 %v", proxies, err)
+		}
+	}
+}
+
+// TestValidateConfigRejectsNonCanonicalJWTIssuer 确保 token issuer 与启动配置只有精确匹配语义。
+func TestValidateConfigRejectsNonCanonicalJWTIssuer(t *testing.T) {
+	for _, issuer := range []string{" ", " api "} {
+		cfg := validBootstrapConfig()
+		cfg.Auth.Issuer = issuer
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "auth.issuer") {
+			t.Fatalf("期望 auth.issuer=%q 被拒绝，实际为 %v", issuer, err)
+		}
+	}
+}
+
 // TestValidateConfigRejectsUnsafeAppID 确保 Redis 命名空间不能被分隔符或空白破坏。
 func TestValidateConfigRejectsUnsafeAppID(t *testing.T) {
 	for _, appID := range []string{"site:other", "site name", "site/{slot}"} {
@@ -59,9 +224,23 @@ func TestValidateConfigRejectsUnsafeAppID(t *testing.T) {
 	}
 }
 
+// TestValidateConfigRejectsNonCanonicalInstanceID 确保节点标识不会在 trace 中被 trim 成另一实例名。
+func TestValidateConfigRejectsNonCanonicalInstanceID(t *testing.T) {
+	for _, instanceID := range []string{" api-1 ", "api:1", "API 1"} {
+		cfg := validBootstrapConfig()
+		cfg.InstanceID = instanceID
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "instance_id") {
+			t.Fatalf("期望 instance_id=%q 被拒绝，实际为 %v", instanceID, err)
+		}
+	}
+}
+
 // TestValidateConfigRejectsInvalidRedisMode 确保 Redis 模式拼写和地址语义不会静默推断成其它客户端。
 func TestValidateConfigRejectsInvalidRedisMode(t *testing.T) {
 	tests := []config.RedisConfig{
+		{Type: "", Addrs: []string{"127.0.0.1:6379"}, PoolSize: 1},
+		{Type: "standalone", Addrs: []string{"127.0.0.1:6379"}, PoolSize: 1},
+		{Type: "SINGLE", Addrs: []string{"127.0.0.1:6379"}, PoolSize: 1},
 		{Type: "cluser", Addrs: []string{"127.0.0.1:6379"}, PoolSize: 1},
 		{Type: "single", Addrs: []string{"127.0.0.1:6379", "127.0.0.1:6380"}, PoolSize: 1},
 		{Type: "single", Addrs: []string{"127.0.0.1:6379"}, AddrMap: map[string]string{"a": "b"}, PoolSize: 1},
@@ -76,18 +255,105 @@ func TestValidateConfigRejectsInvalidRedisMode(t *testing.T) {
 	}
 }
 
+// TestValidateConfigRejectsUnsafeRedisResourceBounds 确保地址探测数量与每节点连接池都有生产硬边界。
+func TestValidateConfigRejectsUnsafeRedisResourceBounds(t *testing.T) {
+	tests := []struct {
+		name string               // name 表示 Redis 错误场景。
+		edit func(*config.Config) // edit 注入待验证的越界配置。
+		want string               // want 是期望错误字段。
+	}{
+		{name: "duplicate address", edit: func(cfg *config.Config) {
+			cfg.Redis.Type = "cluster"
+			cfg.Redis.Addrs = []string{"127.0.0.1:6379", "127.0.0.1:6379"}
+		}, want: "重复"},
+		{name: "too many addresses", edit: func(cfg *config.Config) {
+			cfg.Redis.Type = "cluster"
+			cfg.Redis.Addrs = make([]string, config.MaxRedisAddressCount+1)
+			for index := range cfg.Redis.Addrs {
+				cfg.Redis.Addrs[index] = fmt.Sprintf("127.0.0.1:%d", 7000+index)
+			}
+		}, want: "redis.addrs"},
+		{name: "oversized pool", edit: func(cfg *config.Config) {
+			cfg.Redis.PoolSize = config.MaxRedisPoolSize + 1
+		}, want: "redis.pool_size"},
+		{name: "oversized address map", edit: func(cfg *config.Config) {
+			cfg.Redis.Type = "cluster"
+			cfg.Redis.AddrMap = make(map[string]string, config.MaxRedisAddressMapCount+1)
+			for index := 0; index <= config.MaxRedisAddressMapCount; index++ {
+				cfg.Redis.AddrMap[fmt.Sprintf("node-%d", index)] = "127.0.0.1"
+			}
+		}, want: "redis.addr_map"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validBootstrapConfig()
+			tt.edit(&cfg)
+			if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("期望 Redis 配置返回包含 %q 的错误，实际为 %v", tt.want, err)
+			}
+		})
+	}
+}
+
 // TestValidateConfigRejectsUnsafeRuntimeBounds 确保密码、热加载和 trace 配置不会溢出底层运行时边界。
 func TestValidateConfigRejectsUnsafeRuntimeBounds(t *testing.T) {
 	tests := []func(*config.Config){
 		func(cfg *config.Config) { cfg.Auth.PasswordMinLength = maxPasswordBytes + 1 },
+		func(cfg *config.Config) { cfg.Auth.ProfileCacheTTLSeconds = config.MaxProfileCacheTTLSeconds + 1 },
 		func(cfg *config.Config) { cfg.HotReload.CheckIntervalSeconds = maxHotReloadIntervalSeconds + 1 },
 		func(cfg *config.Config) { cfg.Observability.SampleRatio = 1.01 },
+		func(cfg *config.Config) { cfg.Observability.SlowSQLMs = -1 },
+		func(cfg *config.Config) { cfg.Observability.RedisSlowMs = config.MaxSlowThresholdMilliseconds + 1 },
 	}
 	for _, mutate := range tests {
 		cfg := validBootstrapConfig()
 		mutate(&cfg)
 		if err := Validate(cfg); err == nil {
 			t.Fatalf("expected unsafe runtime bounds to be rejected: %+v", cfg)
+		}
+	}
+}
+
+// TestValidateConfigRejectsLarkDualOrNonCanonicalSources 确保 Lark 明文值和文件引用不存在静默优先级。
+func TestValidateConfigRejectsLarkDualOrNonCanonicalSources(t *testing.T) {
+	tests := []func(*config.Config){
+		func(cfg *config.Config) {
+			cfg.Alert.Lark = config.LarkAlertConfig{Enabled: true, WebhookURL: "https://example.com/hook", WebhookURLRef: "/run/secrets/lark_url"}
+		},
+		func(cfg *config.Config) {
+			cfg.Alert.Lark = config.LarkAlertConfig{Enabled: true, WebhookURL: " https://example.com/hook"}
+		},
+		func(cfg *config.Config) {
+			cfg.Alert.Lark = config.LarkAlertConfig{Enabled: true, WebhookURL: "https://example.com/hook", Secret: "secret", SecretRef: "/run/secrets/lark_secret"}
+		},
+	}
+	for _, edit := range tests {
+		cfg := validBootstrapConfig()
+		edit(&cfg)
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "alert.lark") {
+			t.Fatalf("期望 Lark 双来源或非规范配置被拒绝，实际为 %v", err)
+		}
+	}
+}
+
+// TestValidateConfigRejectsOTLPProtocolAliases 确保 OTLP 配置只有 grpc/http 两种规范值。
+func TestValidateConfigRejectsOTLPProtocolAliases(t *testing.T) {
+	for _, protocol := range []string{"grpc/protobuf", "http/protobuf", "http-protobuf", "HTTP", " http "} {
+		cfg := validBootstrapConfig()
+		cfg.Observability.OTLPProtocol = protocol
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "otlp_protocol") {
+			t.Fatalf("期望 otlp_protocol=%q 被拒绝，实际为 %v", protocol, err)
+		}
+	}
+}
+
+// TestValidateConfigRejectsNonCanonicalOTLPEndpoint 确保上报地址只有 host:port 一种解释。
+func TestValidateConfigRejectsNonCanonicalOTLPEndpoint(t *testing.T) {
+	for _, endpoint := range []string{" http://127.0.0.1:4318 ", "http://127.0.0.1:4318", "127.0.0.1:4318/v1/traces", "127.0.0.1", "127.0.0.1:0"} {
+		cfg := validBootstrapConfig()
+		cfg.Observability.OTLPEndpoint = endpoint
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "otlp_endpoint") {
+			t.Fatalf("期望 otlp_endpoint=%q 被拒绝，实际为 %v", endpoint, err)
 		}
 	}
 }
@@ -108,7 +374,6 @@ func TestValidateConfigRejectsNormalizedSiteMySQLCollision(t *testing.T) {
 func TestValidateConfigRejectsMissingSnowflakeWorkerID(t *testing.T) {
 	cfg := validBootstrapConfig()
 	cfg.Snowflake.WorkerID = nil
-	t.Setenv("SNOWFLAKE_WORKER_ID", "")
 	if err := Validate(cfg); err == nil {
 		t.Fatal("expected missing snowflake.worker_id to be rejected")
 	}
@@ -124,7 +389,6 @@ func TestValidateConfigAcceptsRedisSnowflakeLease(t *testing.T) {
 			"user": {NodeCount: 10},
 		},
 	}
-	t.Setenv("SNOWFLAKE_WORKER_ID", "")
 	if err := Validate(cfg); err != nil {
 		t.Fatalf("expected redis snowflake lease config to pass: %v", err)
 	}
@@ -140,7 +404,6 @@ func TestValidateConfigRejectsInvalidSnowflakeNamespaceNodeCount(t *testing.T) {
 			"user": {NodeCount: int(idgen.SnowflakeMaxWorkerID + 2)},
 		},
 	}
-	t.Setenv("SNOWFLAKE_WORKER_ID", "")
 	if err := Validate(cfg); err == nil {
 		t.Fatal("expected oversized snowflake.redis namespace node_count to be rejected")
 	}
@@ -192,6 +455,21 @@ func TestValidateConfigAcceptsIDSegmentNamespace(t *testing.T) {
 	}
 	if err := Validate(cfg); err != nil {
 		t.Fatalf("expected valid ID Segment config to pass: %v", err)
+	}
+}
+
+// TestValidateConfigRejectsNonCanonicalInheritedSegmentScope 确保 Segment 继承 Redis scope 时不再静默 trim。
+func TestValidateConfigRejectsNonCanonicalInheritedSegmentScope(t *testing.T) {
+	cfg := validBootstrapConfig()
+	cfg.Snowflake.Redis.Scope = " shared "
+	cfg.Snowflake.Segment = config.IDSegmentConfig{
+		Enabled: true,
+		Namespaces: map[string]config.IDSegmentNamespaceConfig{
+			"order": {Enabled: true},
+		},
+	}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "snowflake.segment.scope") {
+		t.Fatalf("期望非规范继承 scope 被拒绝，实际为 %v", err)
 	}
 }
 
@@ -327,6 +605,41 @@ func TestNormalizeConfigPreservesInvalidUserRouteShardCount(t *testing.T) {
 	}
 }
 
+// TestNormalizeConfigPreservesInvalidAuthBounds 确保负数认证参数不会在严格校验前被默认值掩盖。
+func TestNormalizeConfigPreservesInvalidAuthBounds(t *testing.T) {
+	cfg := validBootstrapConfig()
+	cfg.Auth.SessionTTLSeconds = -1
+	cfg.Auth.ProfileCacheTTLSeconds = -1
+	cfg.Auth.PasswordMinLength = -1
+	Normalize(&cfg)
+	if cfg.Auth.SessionTTLSeconds != -1 || cfg.Auth.ProfileCacheTTLSeconds != -1 || cfg.Auth.PasswordMinLength != -1 {
+		t.Fatalf("Normalize() 不应改写负数认证参数: %+v", cfg.Auth)
+	}
+}
+
+// TestValidateConfigRejectsNegativeAuthBounds 确保认证 TTL 和密码长度拼错时拒绝启动。
+func TestValidateConfigRejectsNegativeAuthBounds(t *testing.T) {
+	tests := []struct {
+		name string               // name 表示负数配置场景。
+		edit func(*config.Config) // edit 写入待校验的负数配置。
+		want string               // want 表示错误中必须包含的字段名。
+	}{
+		{name: "session ttl", edit: func(cfg *config.Config) { cfg.Auth.SessionTTLSeconds = -1 }, want: "session_ttl_seconds"},
+		{name: "profile ttl", edit: func(cfg *config.Config) { cfg.Auth.ProfileCacheTTLSeconds = -1 }, want: "profile_cache_ttl_seconds"},
+		{name: "password length", edit: func(cfg *config.Config) { cfg.Auth.PasswordMinLength = -1 }, want: "password_min_length"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validBootstrapConfig()
+			tt.edit(&cfg)
+			Normalize(&cfg)
+			if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("期望负数配置返回包含 %q 的错误，实际为 %v", tt.want, err)
+			}
+		})
+	}
+}
+
 // TestValidateConfigSkipsDisabledCollectorConfig 确保关闭 Collector 时不校验子配置细节。
 func TestValidateConfigSkipsDisabledCollectorConfig(t *testing.T) {
 	cfg := validBootstrapConfig()
@@ -374,6 +687,28 @@ func TestValidateConfigRejectsPublicOpsAllowedIP(t *testing.T) {
 	}
 }
 
+// TestValidateConfigRejectsNonCanonicalOpsConfig 确保运维鉴权配置不会被静默清洗或去重。
+func TestValidateConfigRejectsNonCanonicalOpsConfig(t *testing.T) {
+	tests := []struct {
+		name string               // 子场景名称
+		edit func(*config.Config) // 注入非规范配置
+	}{
+		{name: "令牌首尾空白", edit: func(cfg *config.Config) { cfg.Ops.ConfigReloadToken = " " + cfg.Ops.ConfigReloadToken }},
+		{name: "白名单空项", edit: func(cfg *config.Config) { cfg.Ops.ConfigReloadAllowedIPs = []string{""} }},
+		{name: "白名单首尾空白", edit: func(cfg *config.Config) { cfg.Ops.ConfigReloadAllowedIPs = []string{" 127.0.0.1"} }},
+		{name: "白名单重复", edit: func(cfg *config.Config) { cfg.Ops.ConfigReloadAllowedIPs = []string{"127.0.0.1", "127.0.0.1"} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validBootstrapConfig()
+			tt.edit(&cfg)
+			if err := Validate(cfg); err == nil {
+				t.Fatal("expected non-canonical ops config to be rejected")
+			}
+		})
+	}
+}
+
 // TestValidateConfigRejectsLarkWithoutWebhook 确保启用 Lark 告警时必须配置发送端点。
 func TestValidateConfigRejectsLarkWithoutWebhook(t *testing.T) {
 	cfg := validBootstrapConfig()
@@ -396,6 +731,17 @@ func TestValidateConfigRejectsNegativeLarkOptions(t *testing.T) {
 	cfg.Alert.Lark.MaxErrorBytes = -1
 	if err := Validate(cfg); err == nil {
 		t.Fatal("expected negative lark max_error_bytes to be rejected")
+	}
+}
+
+// TestValidateConfigRejectsOversizedLarkTimeout 防止启动校验接受的值在运行时又被静默改写。
+func TestValidateConfigRejectsOversizedLarkTimeout(t *testing.T) {
+	cfg := validBootstrapConfig()
+	cfg.Alert.Lark.Enabled = true
+	cfg.Alert.Lark.WebhookURL = "https://open.larksuite.com/open-apis/bot/v2/hook/test"
+	cfg.Alert.Lark.TimeoutSeconds = config.MaxLarkAlertTimeoutSeconds + 1
+	if err := Validate(cfg); err == nil {
+		t.Fatal("expected oversized lark timeout to be rejected")
 	}
 }
 
@@ -422,12 +768,40 @@ func TestValidateConfigRejectsLargeAuthRateLimit(t *testing.T) {
 	}
 }
 
+// TestValidateConfigRejectsNegativeAuthRateLimit 确保负数不会被运行时默认值掩盖。
+func TestValidateConfigRejectsNegativeAuthRateLimit(t *testing.T) {
+	for _, edit := range []func(*config.AuthRateLimitConfig){
+		func(item *config.AuthRateLimitConfig) { item.WindowSeconds = -1 },
+		func(item *config.AuthRateLimitConfig) { item.MaxAttempts = -1 },
+		func(item *config.AuthRateLimitConfig) { item.LockSeconds = -1 },
+	} {
+		cfg := validBootstrapConfig()
+		cfg.Auth.LoginRateLimit = config.AuthRateLimitConfig{Enabled: true, WindowSeconds: 60, MaxAttempts: 5, LockSeconds: 300}
+		edit(&cfg.Auth.LoginRateLimit)
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("expected negative auth rate limit to be rejected: %+v", cfg.Auth.LoginRateLimit)
+		}
+	}
+}
+
 // TestValidateConfigRejectsProductionPlaceholderJWTSecret 确保生产环境不能使用示例 JWT 密钥。
 func TestValidateConfigRejectsProductionPlaceholderJWTSecret(t *testing.T) {
 	cfg := validProductionBootstrapConfig()
 	cfg.JwtSecret = "replace-with-strong-secret"
 	if err := Validate(cfg); err == nil {
 		t.Fatal("expected production placeholder jwt_secret to be rejected")
+	}
+}
+
+// TestValidateConfigChecksProductionBeforeSecurityFiles 确保纯配置错误不会触发密钥文件读取。
+func TestValidateConfigChecksProductionBeforeSecurityFiles(t *testing.T) {
+	cfg := validProductionBootstrapConfig()
+	cfg.JwtSecret = "replace-with-strong-secret"
+	cfg.Security.SecretKey = validSecuritySecretKey(t, "v1")
+	cfg.Security.SecretKey.Versions[0].AESKey = ""
+	cfg.Security.SecretKey.Versions[0].AESKeyRef = "/missing/security-key"
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "jwt_secret") {
+		t.Fatalf("Validate() error = %v, want production jwt_secret error", err)
 	}
 }
 
@@ -500,6 +874,17 @@ func TestValidateConfigRequiresMTLSForPrivateInternalHost(t *testing.T) {
 	}
 }
 
+// TestValidateConfigRejectsWhitespaceMTLSPath 确保 mTLS 文件不会按 trim 后的第二条路径加载。
+func TestValidateConfigRejectsWhitespaceMTLSPath(t *testing.T) {
+	cfg := validBootstrapConfig()
+	cfg.InternalServer.CertFile = " /etc/tls/server.crt"
+	cfg.InternalServer.KeyFile = "/etc/tls/server.key"
+	cfg.InternalServer.ClientCAFile = "/etc/tls/client-ca.crt"
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "TLS 文件路径") {
+		t.Fatalf("期望带空白的 mTLS 路径被拒绝，实际为 %v", err)
+	}
+}
+
 // TestValidateConfigRejectsPartialInternalMTLS 确保任意环境都不能接受半配置的 mTLS。
 func TestValidateConfigRejectsPartialInternalMTLS(t *testing.T) {
 	cfg := validBootstrapConfig()
@@ -520,19 +905,26 @@ func TestValidateConfigRejectsCIDRThatExtendsIntoPublicSpace(t *testing.T) {
 
 // validBootstrapConfig 返回满足默认启动校验的 API 测试配置。
 func validBootstrapConfig() config.Config {
-	return config.Config{
-		AppID:     "1",
-		JwtSecret: "test-secret-please-change",
+	cfg := config.Config{
+		RestConf:     rest.RestConf{Host: "127.0.0.1", Port: 8890},
+		AppID:        "1",
+		AppKey:       "test-app-key-0123456789",
+		JwtSecret:    "test-secret-please-change",
+		JwtExpiresIn: config.DefaultJWTExpiresInSeconds,
 		Snowflake: config.SnowflakeConfig{
 			WorkerID: int64Ptr(1),
 		},
 		Auth: config.AuthConfig{
-			PasswordMinLength: 8,
+			Issuer:                 "api",
+			PasswordMinLength:      8,
+			ProfileCacheTTLSeconds: config.DefaultProfileCacheTTLSeconds,
 		},
 		Redis: config.RedisConfig{
+			Type:     "single",
 			Addrs:    []string{"127.0.0.1:6379"},
 			PoolSize: 1,
 		},
+		MySQL: validMySQLConfig("api"),
 		Ops: config.OpsConfig{
 			ConfigReloadToken: "test-ops-token-0123456789",
 		},
@@ -540,6 +932,18 @@ func validBootstrapConfig() config.Config {
 			Host: "127.0.0.1",
 			Port: 8891,
 		},
+	}
+	cfg.Mode = config.ModeDevelopment
+	return cfg
+}
+
+// validMySQLConfig 返回供纯配置校验使用的有界连接池参数。
+func validMySQLConfig(database string) config.MySQLConfig {
+	return config.MySQLConfig{
+		WriteDataSource: "user:password@tcp(127.0.0.1:3306)/" + database,
+		MaxOpenConns:    20,
+		MaxIdleConns:    10,
+		ConnMaxLifetime: 300,
 	}
 }
 

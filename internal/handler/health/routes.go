@@ -17,9 +17,7 @@ func RouteSpecs() []shared.RouteSpec {
 			DocumentPath:  shared.RouteDocHealth,
 			Chain:         shared.RouteSecurityNone,
 			SkipAccessLog: true,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return LiveHandler(svcCtx)
-			},
+			Handler:       LiveHandler,
 		},
 		{
 			Method:        http.MethodGet,
@@ -28,9 +26,7 @@ func RouteSpecs() []shared.RouteSpec {
 			DocumentPath:  shared.RouteDocHealth,
 			Chain:         shared.RouteSecurityNone,
 			SkipAccessLog: true,
-			Handler: func(svcCtx *svc.ServiceContext) http.HandlerFunc {
-				return ReadyHandler(svcCtx)
-			},
+			Handler:       ReadyHandler,
 		},
 		{
 			Method:        http.MethodGet,
@@ -38,6 +34,7 @@ func RouteSpecs() []shared.RouteSpec {
 			Meta:          shared.HealthMetrics,
 			DocumentPath:  shared.RouteDocHealth,
 			Chain:         shared.RouteSecurityNone,
+			InternalOnly:  true,
 			SkipAccessLog: true,
 			Handler: func(_ *svc.ServiceContext) http.HandlerFunc {
 				return MetricsHandler()
