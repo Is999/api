@@ -93,6 +93,8 @@ HTTP 响应统一为：
 
 ## 目录结构
 
+本分支使用 ShardingSphere-Proxy 管理用户物理表。运行配置保持 `user.route_shard_count=1`，共享的 `internal/sharding` 返回逻辑表名；身份目录和固定 `shard_no` 提供路由条件，物理拓扑与迁移工具由 Admin 同名分支维护。
+
 | 目录 | 职责 |
 | --- | --- |
 | `cmd` | API 与迁移命令入口；只处理参数和进程退出 |
@@ -104,7 +106,8 @@ HTTP 响应统一为：
 | `internal/handler` | 路由规格、参数解析、安全链路和响应写出 |
 | `internal/httpresp` | HTTP 统一响应与链路字段写出，只服务请求边界 |
 | `internal/logic` | 用例编排、规则校验、事务和缓存边界 |
-| `internal/model` | GORM Model、身份索引、表定位和数据访问 |
+| `internal/model` | GORM Model、身份目录、固定分片字段和 Proxy 逻辑表访问 |
+| `internal/sharding` | 与 main 共用固定桶映射；本分支配置为 1，仅返回逻辑表名 |
 | `internal/middleware` | 鉴权、签名、加解密、内网 Ops、日志和恢复 |
 | `internal/security` | 路由字段级签名、加密和大小限制契约 |
 | `internal/infra` | MySQL、Redis、日志、Trace 和 Collector 适配 |
