@@ -93,6 +93,8 @@ HTTP 响应统一为：
 
 ## 目录结构
 
+本分支通过 `internal/sharding` 和身份目录按固定逻辑桶定位真实用户表；物理表扩容、在线复制和切换由 Admin 同名分支的 `cmd/tableshard` 执行。
+
 | 目录 | 职责 |
 | --- | --- |
 | `cmd` | API 与迁移命令入口；只处理参数和进程退出 |
@@ -104,7 +106,8 @@ HTTP 响应统一为：
 | `internal/handler` | 路由规格、参数解析、安全链路和响应写出 |
 | `internal/httpresp` | HTTP 统一响应与链路字段写出，只服务请求边界 |
 | `internal/logic` | 用例编排、规则校验、事务和缓存边界 |
-| `internal/model` | GORM Model、身份索引、表定位和数据访问 |
+| `internal/model` | GORM Model、身份索引、物理表定位和数据访问 |
+| `internal/sharding` | 固定桶物理表数量校验、表名映射和扩容计划 |
 | `internal/middleware` | 鉴权、签名、加解密、内网 Ops、日志和恢复 |
 | `internal/security` | 路由字段级签名、加密和大小限制契约 |
 | `internal/infra` | MySQL、Redis、日志、Trace 和 Collector 适配 |
